@@ -71,7 +71,7 @@ Examples:
 
   Deploy with parameters file:
     $0 -g myapp-prod -n myapp-vm -e alerts@example.com \\
-       --parameters ./parameters.hfm.json
+       --parameters ./parameters.json
 
   Deploy with Entra ID access:
     $0 -g myapp-prod -n myapp-vm -e alerts@example.com \\

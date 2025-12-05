@@ -230,9 +230,7 @@ To move resources between subscriptions in the same tenant:
 | `deploy.sh` | Main deployment script |
 | `main.bicep` | Infrastructure as Code (VM, network, alerts) |
 | `cloud-init.yaml` | Generic OS configuration (auto-updates, notifications) |
-| `cloud-init.hfm.yaml` | HFM/kdb+ specific cloud-init (Q daemon setup, health checks) |
 | `parameters.json` | Template parameters file (customize for your project) |
-| `parameters.hfm.json` | HFM/kdb+ specific parameters (Q ports, VPN restrictions) |
 | `serial-console-user-role.json` | Custom role template for minimum Serial Console permissions |
 | `move-subscription.sh` | Script to move resources between subscriptions |
 | `SMTP-SETUP.md` | Email configuration guide |
@@ -291,19 +289,6 @@ Each rule in `inboundPorts` creates an NSG (Network Security Group) rule:
 | `portRange` | Single port or range | `"443"` or `"6000-6007"` |
 | `sourceAddressPrefixes` | Array of allowed CIDRs | `["*"]` or `["10.0.0.0/8"]` |
 | `priority` | Rule priority (1010+, lower = higher priority) | `1010` |
-
-### Example: HFM/kdb+ Deployment
-
-The included `parameters.hfm.json` and `cloud-init.hfm.yaml` configure Q database ports restricted to VPN ranges with daemon health monitoring:
-
-```bash
-./deploy.sh \
-    -g hfm-prod \
-    -n hfm-vm \
-    -e alerts@example.com \
-    --parameters ./parameters.hfm.json \
-    --cloud-init ./cloud-init.hfm.yaml
-```
 
 ### Example: Web Application
 
