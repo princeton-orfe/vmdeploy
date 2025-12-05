@@ -12,6 +12,17 @@ This deployment script provisions:
 - Metric alerts (availability, CPU, memory)
 - Auto-updates with unattended-upgrades
 
+## When Not to Use
+
+This script is pragmatic for simple, single-user deployments. Consider alternatives like Terraform, Pulumi, or Azure DevOps/GitHub Actions pipelines if you need:
+
+- **State tracking** - Know what's deployed vs. what's defined
+- **Drift detection** - Catch manual changes made outside of code
+- **Rollback** - Revert to previous infrastructure versions
+- **Team collaboration** - State locking, remote state, PR reviews
+- **Testing** - Validate before deploy, policy checks (OPA, Azure Policy)
+- **Secrets management** - Azure Key Vault integration instead of prompts
+
 ## Prerequisites
 
 - Azure CLI installed (`az`)
