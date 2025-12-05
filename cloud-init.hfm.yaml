@@ -1,0 +1,266 @@
+#cloud-config
+
+# HFM (Historical Financial Markets) - Cloud Init Configuration
+# This configures automatic updates, daemon installation, and failure notifications
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - unattended-upgrades
+  - apt-listchanges
+  - postfix
+  - mailutils
+  - jq
+
+# Create hfm user
+users:
+  - name: hfm
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    home: /home/hfm
+
+# Write configuration files
+write_files:
+  # Unattended upgrades configuration - aggressive auto-update
+  - path: /etc/apt/apt.conf.d/50unattended-upgrades
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+          "${distro_id}:${distro_codename}";
+          "${distro_id}:${distro_codename}-security";
+          "${distro_id}:${distro_codename}-updates";
+          "${distro_id}ESMApps:${distro_codename}-apps-security";
+          "${distro_id}ESM:${distro_codename}-infra-security";
+      };
+      Unattended-Upgrade::Package-Blacklist {
+      };
+      Unattended-Upgrade::DevRelease "auto";
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::MinimalSteps "true";
+      Unattended-Upgrade::InstallOnShutdown "false";
+      Unattended-Upgrade::Mail "${ALERT_EMAIL}";
+      Unattended-Upgrade::MailReport "on-change";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::SyslogEnable "true";
+      Unattended-Upgrade::SyslogFacility "daemon";
+
+  # Enable automatic updates
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # Systemd failure notification script
+  - path: /usr/local/bin/notify-failure.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Sends email notification on systemd service failure
+
+      SERVICE="$1"
+      HOSTNAME=$(hostname)
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+      # Get service status
+      STATUS=$(systemctl status "$SERVICE" 2>&1 | head -20)
+      JOURNAL=$(journalctl -u "$SERVICE" -n 50 --no-pager 2>&1)
+
+      # Send email
+      cat <<EOF | mail -s "[ALERT] Service $SERVICE failed on $HOSTNAME" ${ALERT_EMAIL}
+      Service Failure Alert
+      =====================
+
+      Host: $HOSTNAME
+      Service: $SERVICE
+      Time: $TIMESTAMP
+
+      Service Status:
+      ---------------
+      $STATUS
+
+      Recent Logs:
+      ------------
+      $JOURNAL
+      EOF
+
+      # Also log to syslog
+      logger -t notify-failure "Service $SERVICE failed on $HOSTNAME"
+
+  # Q daemon health check script
+  - path: /usr/local/bin/check-q-health.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Checks Q daemon health and sends alerts for failures
+
+      QHOME=/home/hfm/q
+      ALERT_SENT_FILE="/tmp/q-alert-sent"
+
+      check_port() {
+          local port=$1
+          if pgrep -f "db -p $port" > /dev/null; then
+              # Process running, check if responsive
+              if timeout 5 bash -c "echo 'tables[]' | $QHOME/l64/q -p $port" > /dev/null 2>&1; then
+                  return 0
+              fi
+          fi
+          return 1
+      }
+
+      FAILED_PORTS=""
+      for port in 6000 6001 6002 6003 6004 6005 6006 6007; do
+          if ! check_port $port; then
+              FAILED_PORTS="$FAILED_PORTS $port"
+          fi
+      done
+
+      if [ -n "$FAILED_PORTS" ]; then
+          # Only alert once per failure cycle
+          if [ ! -f "$ALERT_SENT_FILE" ]; then
+              HOSTNAME=$(hostname)
+              TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+              cat <<EOF | mail -s "[ALERT] Q daemon failure on $HOSTNAME" ${ALERT_EMAIL}
+      Q Daemon Failure Alert
+      ======================
+
+      Host: $HOSTNAME
+      Time: $TIMESTAMP
+      Failed Ports:$FAILED_PORTS
+
+      The watchdog service will attempt automatic recovery.
+
+      Current Process Status:
+      $(ps aux | grep '[q].*db -p 600')
+
+      Service Status:
+      $(systemctl --user -M hfm@ status qservice.service 2>&1 | head -20)
+      EOF
+
+              touch "$ALERT_SENT_FILE"
+              logger -t check-q-health "Q daemons failed on ports:$FAILED_PORTS"
+          fi
+      else
+          # All healthy, clear alert state
+          rm -f "$ALERT_SENT_FILE"
+      fi
+
+  # Systemd service for Q health monitoring
+  - path: /etc/systemd/system/q-health-check.service
+    content: |
+      [Unit]
+      Description=Q Daemon Health Check
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/check-q-health.sh
+      User=root
+
+  - path: /etc/systemd/system/q-health-check.timer
+    content: |
+      [Unit]
+      Description=Run Q health check every 5 minutes
+
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+
+      [Install]
+      WantedBy=timers.target
+
+  # Failure notification service template
+  - path: /etc/systemd/system/notify-failure@.service
+    content: |
+      [Unit]
+      Description=Send failure notification for %i
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/notify-failure.sh %i
+      User=root
+
+  # Drop-in for qservice to trigger failure notification
+  - path: /home/hfm/.config/systemd/user/qservice.service.d/notify.conf
+    content: |
+      [Unit]
+      OnFailure=notify-failure@%n.service
+
+  # Postfix configuration for sending email via Azure
+  - path: /etc/postfix/main.cf.append
+    content: |
+      # Relay through localhost - configure with Azure SendGrid or similar
+      relayhost = [smtp.sendgrid.net]:587
+      smtp_sasl_auth_enable = yes
+      smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+      smtp_sasl_security_options = noanonymous
+      smtp_tls_security_level = encrypt
+      header_size_limit = 4096000
+
+# Disk setup - format and mount data disk
+disk_setup:
+  /dev/disk/azure/scsi1/lun0:
+    table_type: gpt
+    layout: true
+    overwrite: false
+
+fs_setup:
+  - label: rfadata
+    filesystem: ext4
+    device: /dev/disk/azure/scsi1/lun0
+    partition: auto
+    overwrite: false
+
+mounts:
+  - ["/dev/disk/azure/scsi1/lun0-part1", "/home/hfm/db", "ext4", "defaults,nofail,x-systemd.device-timeout=300", "0", "2"]
+
+# Commands to run
+runcmd:
+  # Create mount point
+  - mkdir -p /home/hfm/db
+
+  # Create required directories
+  - mkdir -p /home/hfm/q/l64
+  - mkdir -p /home/hfm/q/logs
+  - mkdir -p /home/hfm/.config/systemd/user
+
+  # Set ownership
+  - chown -R hfm:hfm /home/hfm
+
+  # Enable linger for hfm user
+  - loginctl enable-linger hfm
+
+  # Enable health check timer
+  - systemctl daemon-reload
+  - systemctl enable q-health-check.timer
+  - systemctl start q-health-check.timer
+
+  # Enable unattended upgrades
+  - systemctl enable unattended-upgrades
+  - systemctl start unattended-upgrades
+
+  # Configure postfix (will need manual SMTP credential setup)
+  - |
+    if [ -f /etc/postfix/main.cf.append ]; then
+      cat /etc/postfix/main.cf.append >> /etc/postfix/main.cf
+    fi
+
+  # Log completion
+  - echo "Cloud-init HFM setup completed at $(date)" >> /var/log/hfm-setup.log
+
+final_message: |
+  HFM cloud-init configuration complete.
+
+  Next steps:
+  1. Upload Q binary to /home/hfm/q/l64/q
+  2. Upload license to /home/hfm/q/l64/k4.lic
+  3. Upload database to /home/hfm/db/
+  4. Configure SMTP credentials in /etc/postfix/sasl_passwd
+  5. Start the service: sudo -u hfm systemctl --user start qservice.service

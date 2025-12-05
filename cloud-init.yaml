@@ -1,0 +1,172 @@
+#cloud-config
+
+# Generic Azure VM Cloud Init Configuration
+# Configures automatic updates, service user, and failure notifications
+#
+# Customize this file for your application or use a project-specific
+# cloud-init file (e.g., cloud-init.hfm.yaml for kdb+/Q deployments)
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - unattended-upgrades
+  - apt-listchanges
+  - postfix
+  - mailutils
+  - jq
+
+# Create application service user
+# Customize the username for your application
+users:
+  - name: appuser
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    home: /home/appuser
+
+# Write configuration files
+write_files:
+  # Unattended upgrades configuration - aggressive auto-update
+  - path: /etc/apt/apt.conf.d/50unattended-upgrades
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+          "${distro_id}:${distro_codename}";
+          "${distro_id}:${distro_codename}-security";
+          "${distro_id}:${distro_codename}-updates";
+          "${distro_id}ESMApps:${distro_codename}-apps-security";
+          "${distro_id}ESM:${distro_codename}-infra-security";
+      };
+      Unattended-Upgrade::Package-Blacklist {
+      };
+      Unattended-Upgrade::DevRelease "auto";
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::MinimalSteps "true";
+      Unattended-Upgrade::InstallOnShutdown "false";
+      Unattended-Upgrade::Mail "${ALERT_EMAIL}";
+      Unattended-Upgrade::MailReport "on-change";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::SyslogEnable "true";
+      Unattended-Upgrade::SyslogFacility "daemon";
+
+  # Enable automatic updates
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # Systemd failure notification script
+  - path: /usr/local/bin/notify-failure.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Sends email notification on systemd service failure
+
+      SERVICE="$1"
+      HOSTNAME=$(hostname)
+      TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+      # Get service status
+      STATUS=$(systemctl status "$SERVICE" 2>&1 | head -20)
+      JOURNAL=$(journalctl -u "$SERVICE" -n 50 --no-pager 2>&1)
+
+      # Send email
+      cat <<EOF | mail -s "[ALERT] Service $SERVICE failed on $HOSTNAME" ${ALERT_EMAIL}
+      Service Failure Alert
+      =====================
+
+      Host: $HOSTNAME
+      Service: $SERVICE
+      Time: $TIMESTAMP
+
+      Service Status:
+      ---------------
+      $STATUS
+
+      Recent Logs:
+      ------------
+      $JOURNAL
+      EOF
+
+      # Also log to syslog
+      logger -t notify-failure "Service $SERVICE failed on $HOSTNAME"
+
+  # Failure notification service template
+  - path: /etc/systemd/system/notify-failure@.service
+    content: |
+      [Unit]
+      Description=Send failure notification for %i
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/notify-failure.sh %i
+      User=root
+
+  # Postfix configuration for sending email via Azure
+  - path: /etc/postfix/main.cf.append
+    content: |
+      # Relay through localhost - configure with Azure SendGrid or similar
+      relayhost = [smtp.sendgrid.net]:587
+      smtp_sasl_auth_enable = yes
+      smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+      smtp_sasl_security_options = noanonymous
+      smtp_tls_security_level = encrypt
+      header_size_limit = 4096000
+
+# Disk setup - format and mount data disk
+disk_setup:
+  /dev/disk/azure/scsi1/lun0:
+    table_type: gpt
+    layout: true
+    overwrite: false
+
+fs_setup:
+  - label: appdata
+    filesystem: ext4
+    device: /dev/disk/azure/scsi1/lun0
+    partition: auto
+    overwrite: false
+
+mounts:
+  - ["/dev/disk/azure/scsi1/lun0-part1", "/home/appuser/data", "ext4", "defaults,nofail,x-systemd.device-timeout=300", "0", "2"]
+
+# Commands to run
+runcmd:
+  # Create mount point
+  - mkdir -p /home/appuser/data
+
+  # Set ownership
+  - chown -R appuser:appuser /home/appuser
+
+  # Enable linger for service user (allows user services to run without login)
+  - loginctl enable-linger appuser
+
+  # Enable unattended upgrades
+  - systemctl daemon-reload
+  - systemctl enable unattended-upgrades
+  - systemctl start unattended-upgrades
+
+  # Configure postfix (will need manual SMTP credential setup)
+  - |
+    if [ -f /etc/postfix/main.cf.append ]; then
+      cat /etc/postfix/main.cf.append >> /etc/postfix/main.cf
+    fi
+
+  # Log completion
+  - echo "Cloud-init setup completed at $(date)" >> /var/log/cloud-init-setup.log
+
+final_message: |
+  Cloud-init configuration complete.
+
+  Next steps:
+  1. Upload your application files to /home/appuser/
+  2. Configure your application service
+  3. Configure SMTP credentials in /etc/postfix/sasl_passwd (see SMTP-SETUP.md)
+  4. Start your service

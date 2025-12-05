@@ -1,0 +1,18 @@
+{
+  "Name": "Serial Console User",
+  "Description": "Minimum permissions for Azure Serial Console access with Entra ID login. Can connect to Serial Console and login with Entra credentials, but cannot modify VM or other resources.",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action",
+    "Microsoft.Storage/storageAccounts/read",
+    "Microsoft.Storage/storageAccounts/listKeys/action",
+    "Microsoft.SerialConsole/serialPorts/connect/action",
+    "Microsoft.Resources/subscriptions/resourceGroups/read"
+  ],
+  "NotActions": [],
+  "DataActions": [
+    "Microsoft.Compute/virtualMachines/login/action"
+  ],
+  "NotDataActions": [],
+  "AssignableScopes": []
+}

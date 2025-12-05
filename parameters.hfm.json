@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "HFM (kdb+/Q) specific deployment parameters",
+    "template": "main.bicep"
+  },
+  "parameters": {
+    "projectName": {
+      "value": "hfm",
+      "metadata": {
+        "description": "Project name for storage account naming"
+      }
+    },
+    "inboundPorts": {
+      "value": [
+        {
+          "name": "Q-Ports-VPN-1",
+          "portRange": "6000-6007",
+          "sourceAddressPrefixes": ["172.20.192.0/19"],
+          "priority": 1010
+        },
+        {
+          "name": "Q-Ports-VPN-2",
+          "portRange": "6000-6007",
+          "sourceAddressPrefixes": ["172.20.95.0/24"],
+          "priority": 1011
+        }
+      ],
+      "metadata": {
+        "description": "Q database ports restricted to VPN ranges only"
+      }
+    },
+    "serviceUser": {
+      "value": "rfa",
+      "metadata": {
+        "description": "Linux user that runs the Q database service"
+      }
+    },
+    "servicePorts": {
+      "value": "6000-6007",
+      "metadata": {
+        "description": "Q database port range"
+      }
+    }
+  }
+}

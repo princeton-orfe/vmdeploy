@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Azure VM deployment parameters. Customize this file for your project.",
+    "template": "main.bicep"
+  },
+  "parameters": {
+    "projectName": {
+      "value": "myapp",
+      "metadata": {
+        "description": "Short project name used for storage account naming (lowercase, no special chars)"
+      }
+    },
+    "inboundPorts": {
+      "value": [
+        {
+          "name": "App-Ports",
+          "portRange": "8080",
+          "sourceAddressPrefixes": ["*"],
+          "priority": 1010
+        }
+      ],
+      "metadata": {
+        "description": "Array of inbound port rules. Each rule needs: name, portRange (e.g., '80' or '6000-6007'), sourceAddressPrefixes (array of CIDRs or '*'), priority (1010+)"
+      }
+    },
+    "serviceUser": {
+      "value": "appuser",
+      "metadata": {
+        "description": "Linux user that will run the application service"
+      }
+    },
+    "servicePorts": {
+      "value": "8080",
+      "metadata": {
+        "description": "Port range for display in deployment output (e.g., '8080' or '6000-6007')"
+      }
+    }
+  }
+}
