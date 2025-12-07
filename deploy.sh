@@ -20,6 +20,7 @@ ADMIN_USERNAME="azureuser"
 ENTRA_ADMIN=""
 ENTRA_USERS=()
 ENABLE_ENTRA_LOGIN=false
+SERVICE_ADMINS=()
 
 # Template files (defaults to files in same directory as script)
 BICEP_FILE="$SCRIPT_DIR/main.bicep"
@@ -61,6 +62,8 @@ Template Options:
 Entra ID Access (enables Serial Console login with Entra credentials):
   --entra-admin EMAIL          Entra ID user with admin/sudo access
   --entra-user EMAIL           Entra ID user with standard access (repeatable)
+  --service-admin EMAIL        Entra ID user who can act as service user (repeatable)
+                               Grants: sudo su - <serviceUser>, systemctl control
 
 Other:
   -h, --help                   Show this help message
@@ -141,6 +144,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --entra-user)
             ENTRA_USERS+=("$2")
+            ENABLE_ENTRA_LOGIN=true
+            shift 2
+            ;;
+        --service-admin)
+            SERVICE_ADMINS+=("$2")
             ENABLE_ENTRA_LOGIN=true
             shift 2
             ;;
@@ -338,9 +346,16 @@ echo "Entra ID Access:"
 if [[ -n "$ENTRA_ADMIN" ]]; then
 echo "  - Admin (sudo): $ENTRA_ADMIN"
 fi
+if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
 for user in "${ENTRA_USERS[@]}"; do
 echo "  - User: $user"
 done
+fi
+if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+for user in "${SERVICE_ADMINS[@]}"; do
+echo "  - Service Admin: $user (can act as $SERVICE_USER)"
+done
+fi
 fi
 echo "========================================"
 
@@ -371,15 +386,25 @@ if [[ "$DRY_RUN" == "true" ]]; then
         if [[ -n "$ENTRA_ADMIN" ]]; then
             echo "       - $ENTRA_ADMIN: Virtual Machine Administrator Login (sudo)"
         fi
-        if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
+        if [[ ${#ENTRA_USERS[@]} -gt 0 || ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
             echo "       - CREATE custom role: 'Serial Console User - $VM_NAME'"
             if [[ -n "$CUSTOM_ROLE_FILE" ]]; then
                 echo "         (using custom definition: $CUSTOM_ROLE_FILE)"
             else
                 echo "         (scoped to this VM and its storage account only)"
             fi
-            for user in "${ENTRA_USERS[@]}"; do
-                echo "       - $user: Serial Console User (no sudo, no Run Command, no other VMs)"
+            if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
+                for user in "${ENTRA_USERS[@]}"; do
+                    echo "       - $user: Serial Console User (no sudo, no Run Command, no other VMs)"
+                done
+            fi
+        fi
+        if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+            echo "       - CREATE sudoers rules for service admins:"
+            for user in "${SERVICE_ADMINS[@]}"; do
+                # Extract username from email (part before @)
+                local_user="${user%%@*}"
+                echo "       - $user ($local_user): can sudo as $SERVICE_USER, control systemd"
             done
         fi
     fi
@@ -433,9 +458,27 @@ if az group show --name "$RESOURCE_GROUP" &> /dev/null; then
     fi
 fi
 
-# Process cloud-init template with email substitution
+# Process cloud-init template with substitutions
 CLOUD_INIT_PROCESSED=$(mktemp)
-sed "s/\${ALERT_EMAIL}/$ALERT_EMAIL/g" "$CLOUD_INIT_FILE" > "$CLOUD_INIT_PROCESSED"
+
+# Build comma-separated list of service admin usernames (extracted from emails)
+SERVICE_ADMIN_USERS=""
+if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+    for admin in "${SERVICE_ADMINS[@]}"; do
+        local_user="${admin%%@*}"
+        if [[ -z "$SERVICE_ADMIN_USERS" ]]; then
+            SERVICE_ADMIN_USERS="$local_user"
+        else
+            SERVICE_ADMIN_USERS="$SERVICE_ADMIN_USERS,$local_user"
+        fi
+    done
+fi
+
+# Substitute variables in cloud-init template
+sed -e "s/\${ALERT_EMAIL}/$ALERT_EMAIL/g" \
+    -e "s/\${SERVICE_USER}/$SERVICE_USER/g" \
+    -e "s/\${SERVICE_ADMIN_USERS}/$SERVICE_ADMIN_USERS/g" \
+    "$CLOUD_INIT_FILE" > "$CLOUD_INIT_PROCESSED"
 
 echo ""
 echo "Step 1/4: Creating resource group..."
@@ -512,8 +555,8 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
             --output none 2>/dev/null || echo "    Warning: Could not assign role (user may not exist or already assigned)"
     fi
 
-    # For regular users, create custom role with minimum Serial Console permissions
-    if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
+    # For regular users and service admins, create custom role with minimum Serial Console permissions
+    if [[ ${#ENTRA_USERS[@]} -gt 0 || ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
         CUSTOM_ROLE_NAME="Serial Console User - $VM_NAME"
 
         # Get the actual storage account name from deployment output
@@ -562,23 +605,44 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
             sleep 15
         fi
 
-        for user in "${ENTRA_USERS[@]}"; do
-            echo "  Granting Serial Console access to $user (scoped to $VM_NAME only)..."
+        if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
+            for user in "${ENTRA_USERS[@]}"; do
+                echo "  Granting Serial Console access to $user (scoped to $VM_NAME only)..."
 
-            # Assign role scoped to VM
-            az role assignment create \
-                --assignee "$user" \
-                --role "$CUSTOM_ROLE_NAME" \
-                --scope "$VM_RESOURCE_ID" \
-                --output none 2>/dev/null || echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+                # Assign role scoped to VM
+                az role assignment create \
+                    --assignee "$user" \
+                    --role "$CUSTOM_ROLE_NAME" \
+                    --scope "$VM_RESOURCE_ID" \
+                    --output none 2>/dev/null || echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
 
-            # Assign role scoped to storage account (required for boot diagnostics)
-            az role assignment create \
-                --assignee "$user" \
-                --role "$CUSTOM_ROLE_NAME" \
-                --scope "$STORAGE_ACCOUNT_ID" \
-                --output none 2>/dev/null || echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
-        done
+                # Assign role scoped to storage account (required for boot diagnostics)
+                az role assignment create \
+                    --assignee "$user" \
+                    --role "$CUSTOM_ROLE_NAME" \
+                    --scope "$STORAGE_ACCOUNT_ID" \
+                    --output none 2>/dev/null || echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+            done
+        fi
+
+        # Service admins also need Serial Console access (plus sudoers configured via cloud-init)
+        if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+            for user in "${SERVICE_ADMINS[@]}"; do
+                echo "  Granting Serial Console access to $user (service admin, scoped to $VM_NAME only)..."
+
+                az role assignment create \
+                    --assignee "$user" \
+                    --role "$CUSTOM_ROLE_NAME" \
+                    --scope "$VM_RESOURCE_ID" \
+                    --output none 2>/dev/null || echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+
+                az role assignment create \
+                    --assignee "$user" \
+                    --role "$CUSTOM_ROLE_NAME" \
+                    --scope "$STORAGE_ACCOUNT_ID" \
+                    --output none 2>/dev/null || echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+            done
+        fi
     fi
 fi
 
@@ -599,9 +663,16 @@ echo "Entra ID Login:"
 if [[ -n "$ENTRA_ADMIN" ]]; then
 echo "  Admin: $ENTRA_ADMIN (has sudo, full VM access)"
 fi
+if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
 for user in "${ENTRA_USERS[@]}"; do
 echo "  User: $user (Serial Console only, no sudo)"
 done
+fi
+if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+for user in "${SERVICE_ADMINS[@]}"; do
+echo "  Service Admin: $user (can act as $SERVICE_USER)"
+done
+fi
 echo ""
 echo "  Login at Serial Console with Entra email and password."
 fi

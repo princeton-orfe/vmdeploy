@@ -47,6 +47,15 @@ This script is pragmatic for simple, single-user deployments. Consider alternati
     --entra-user user1@example.com \
     --entra-user user2@example.com
 
+# With service admins (can manage application without root)
+./deploy.sh \
+    -g my-resource-group \
+    -n my-vm \
+    -e alerts@example.com \
+    --parameters ./parameters.json \
+    --service-admin operator1@example.com \
+    --service-admin operator2@example.com
+
 # With custom VM options
 ./deploy.sh \
     -g my-resource-group \
@@ -88,6 +97,7 @@ The script will prompt for an admin password (used for Serial Console access).
 | `-d, --disk-size` | Data disk size in GB (default: 64) |
 | `--entra-admin` | Entra ID user with admin/sudo access |
 | `--entra-user` | Entra ID user with standard access (repeatable) |
+| `--service-admin EMAIL` | Entra ID user who can act as service user (repeatable) |
 | `--dry-run` | Show what would happen without making changes |
 | `--destroy` | Tear down all resources |
 | `--bicep FILE` | Custom Bicep template (default: ./main.bicep) |
@@ -151,8 +161,50 @@ Use `--entra-admin` and `--entra-user` flags to grant access during deployment:
 
 - `--entra-admin`: Grants "Virtual Machine Administrator Login" role (has sudo)
 - `--entra-user`: Grants custom "Serial Console User" role (minimum permissions for Serial Console only)
+- `--service-admin`: Grants Serial Console access PLUS sudoers rules to act as the service user
 
 Users can then login at Serial Console with their Entra ID email and password.
+
+### Service Admins
+
+The `--service-admin` option is designed for users who need to manage a specific service without having full sudo access to the entire system. This is useful for delegating application management (e.g., license updates, service restarts) without granting root access.
+
+```bash
+./deploy.sh -g my-resource-group -n my-vm -e alerts@example.com \
+    --parameters ./parameters.json \
+    --service-admin operator1@example.com \
+    --service-admin operator2@example.com
+```
+
+You can specify multiple `--service-admin` arguments to grant access to multiple users.
+
+A service admin can:
+
+| Command | What it does |
+|---------|--------------|
+| `sudo su - <serviceUser>` | Switch to the service user's shell |
+| `sudo -u <serviceUser> <command>` | Run any command as the service user |
+| `sudo -u <serviceUser> systemctl --user ...` | Control the service user's systemd services |
+
+For example, if `serviceUser` is `hfm` in your parameters file:
+
+```bash
+# Switch to hfm user
+sudo su - hfm
+
+# Run a command as hfm
+sudo -u hfm whoami
+
+# Control hfm's systemd user service
+sudo -u hfm systemctl --user restart qservice
+```
+
+**Note:** Service admins do NOT have:
+- Full sudo/root access
+- Access to other users' files or services
+- Azure Run Command access (script execution)
+
+This follows the principle of least privilege - operators can manage the application without system-wide root access.
 
 ### Post-Deployment
 
