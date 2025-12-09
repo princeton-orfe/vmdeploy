@@ -630,6 +630,13 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
             for user in "${SERVICE_ADMINS[@]}"; do
                 echo "  Granting Serial Console access to $user (service admin, scoped to $VM_NAME only)..."
 
+                # Virtual Machine User Login - required for Entra ID login at console prompt
+                az role assignment create \
+                    --assignee "$user" \
+                    --role "Virtual Machine User Login" \
+                    --scope "$VM_RESOURCE_ID" \
+                    --output none 2>/dev/null || echo "    Warning: Could not assign VM User Login role (user may not exist or already assigned)"
+
                 az role assignment create \
                     --assignee "$user" \
                     --role "$CUSTOM_ROLE_NAME" \

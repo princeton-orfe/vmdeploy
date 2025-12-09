@@ -54,6 +54,21 @@ var actionGroupName = '${vmName}-alerts'
 // Short name max 12 chars - use project name or truncate vm name
 var actionGroupShortName = length(projectName) <= 8 ? '${projectName}-alrt' : substring(vmName, 0, min(length(vmName), 8))
 
+// Pre-compute custom inbound port rules (for-expressions must be in variable context)
+var customInboundRules = [for rule in inboundPorts: {
+  name: rule.name
+  properties: {
+    priority: rule.priority
+    direction: 'Inbound'
+    access: 'Allow'
+    protocol: 'Tcp'
+    sourcePortRange: '*'
+    destinationPortRange: rule.portRange
+    sourceAddressPrefixes: rule.sourceAddressPrefixes
+    destinationAddressPrefix: '*'
+  }
+}]
+
 // Network Security Group - Conditional SSH, custom inbound ports
 resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
   name: nsgName
@@ -91,19 +106,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
         }
       ],
       // Custom inbound port rules from parameters
-      [for rule in inboundPorts: {
-        name: rule.name
-        properties: {
-          priority: rule.priority
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourcePortRange: '*'
-          destinationPortRange: rule.portRange
-          sourceAddressPrefixes: rule.sourceAddressPrefixes
-          destinationAddressPrefix: '*'
-        }
-      }]
+      customInboundRules
     )
   }
 }
@@ -183,6 +186,9 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
 resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
   name: vmName
   location: location
+  identity: enableEntraSSH ? {
+    type: 'SystemAssigned'
+  } : null
   properties: {
     hardwareProfile: {
       vmSize: vmSize
