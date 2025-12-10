@@ -50,6 +50,9 @@ var dataDiskName = '${vmName}-datadisk'
 @description('Admin password for VM (min 12 chars, must include uppercase, lowercase, number, and special char)')
 param adminPassword string
 
+@description('Base64-encoded cloud-init configuration')
+param customData string = ''
+
 var actionGroupName = '${vmName}-alerts'
 // Short name max 12 chars - use project name or truncate vm name
 var actionGroupShortName = length(projectName) <= 8 ? '${projectName}-alrt' : substring(vmName, 0, min(length(vmName), 8))
@@ -197,6 +200,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
       computerName: vmName
       adminUsername: adminUsername
       adminPassword: adminPassword
+      customData: !empty(customData) ? customData : null
       linuxConfiguration: {
         disablePasswordAuthentication: false
         patchSettings: {

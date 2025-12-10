@@ -461,15 +461,15 @@ fi
 # Process cloud-init template with substitutions
 CLOUD_INIT_PROCESSED=$(mktemp)
 
-# Build comma-separated list of service admin usernames (extracted from emails)
+# Build comma-separated list of service admin usernames
+# Entra ID login uses full email as Linux username (e.g., bino@princeton.edu)
 SERVICE_ADMIN_USERS=""
 if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
     for admin in "${SERVICE_ADMINS[@]}"; do
-        local_user="${admin%%@*}"
         if [[ -z "$SERVICE_ADMIN_USERS" ]]; then
-            SERVICE_ADMIN_USERS="$local_user"
+            SERVICE_ADMIN_USERS="$admin"
         else
-            SERVICE_ADMIN_USERS="$SERVICE_ADMIN_USERS,$local_user"
+            SERVICE_ADMIN_USERS="$SERVICE_ADMIN_USERS,$admin"
         fi
     done
 fi
@@ -479,6 +479,9 @@ sed -e "s/\${ALERT_EMAIL}/$ALERT_EMAIL/g" \
     -e "s/\${SERVICE_USER}/$SERVICE_USER/g" \
     -e "s/\${SERVICE_ADMIN_USERS}/$SERVICE_ADMIN_USERS/g" \
     "$CLOUD_INIT_FILE" > "$CLOUD_INIT_PROCESSED"
+
+# Base64 encode cloud-init for passing to Bicep
+CLOUD_INIT_BASE64=$(base64 -i "$CLOUD_INIT_PROCESSED" | tr -d '\n')
 
 echo ""
 echo "Step 1/4: Creating resource group..."
@@ -501,6 +504,7 @@ DEPLOYMENT_OUTPUT=$(az deployment group create \
         enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
         projectName="$PROJECT_NAME" \
         inboundPorts="$INBOUND_PORTS_JSON" \
+        customData="$CLOUD_INIT_BASE64" \
     --output json)
 
 VM_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPublicIp.value')
@@ -533,6 +537,31 @@ rm -f "$CLOUD_INIT_PROCESSED"
 VM_RESOURCE_ID=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmResourceId.value')
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
+# Helper function to assign role with retry
+assign_role_with_retry() {
+    local assignee="$1"
+    local role="$2"
+    local scope="$3"
+    local max_attempts=3
+    local attempt=1
+
+    while [[ $attempt -le $max_attempts ]]; do
+        if az role assignment create \
+            --assignee "$assignee" \
+            --role "$role" \
+            --scope "$scope" \
+            --output none 2>/dev/null; then
+            return 0
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            sleep $((attempt * 5))
+        fi
+        ((attempt++))
+    done
+    return 1
+}
+
 # Assign Entra ID roles if specified
 if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
     echo ""
@@ -548,11 +577,9 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
 
     if [[ -n "$ENTRA_ADMIN" ]]; then
         echo "  Granting admin access to $ENTRA_ADMIN..."
-        az role assignment create \
-            --assignee "$ENTRA_ADMIN" \
-            --role "Virtual Machine Administrator Login" \
-            --scope "$VM_RESOURCE_ID" \
-            --output none 2>/dev/null || echo "    Warning: Could not assign role (user may not exist or already assigned)"
+        if ! assign_role_with_retry "$ENTRA_ADMIN" "Virtual Machine Administrator Login" "$VM_RESOURCE_ID"; then
+            echo "    Warning: Could not assign role (user may not exist or already assigned)"
+        fi
     fi
 
     # For regular users and service admins, create custom role with minimum Serial Console permissions
@@ -600,9 +627,18 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
                 }" --output none 2>/dev/null || echo "    Warning: Could not create custom role (may already exist)"
             fi
 
-            # Wait for role to propagate
+            # Wait for role to propagate - poll until queryable
             echo "  Waiting for role to propagate..."
-            sleep 15
+            for i in {1..12}; do
+                if az role definition list --name "$CUSTOM_ROLE_NAME" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
+                    echo "  Role is now available."
+                    break
+                fi
+                if [[ $i -eq 12 ]]; then
+                    echo "  Warning: Role propagation timeout, continuing anyway..."
+                fi
+                sleep 5
+            done
         fi
 
         if [[ ${#ENTRA_USERS[@]} -gt 0 ]]; then
@@ -610,18 +646,14 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
                 echo "  Granting Serial Console access to $user (scoped to $VM_NAME only)..."
 
                 # Assign role scoped to VM
-                az role assignment create \
-                    --assignee "$user" \
-                    --role "$CUSTOM_ROLE_NAME" \
-                    --scope "$VM_RESOURCE_ID" \
-                    --output none 2>/dev/null || echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+                if ! assign_role_with_retry "$user" "$CUSTOM_ROLE_NAME" "$VM_RESOURCE_ID"; then
+                    echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+                fi
 
                 # Assign role scoped to storage account (required for boot diagnostics)
-                az role assignment create \
-                    --assignee "$user" \
-                    --role "$CUSTOM_ROLE_NAME" \
-                    --scope "$STORAGE_ACCOUNT_ID" \
-                    --output none 2>/dev/null || echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+                if ! assign_role_with_retry "$user" "$CUSTOM_ROLE_NAME" "$STORAGE_ACCOUNT_ID"; then
+                    echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+                fi
             done
         fi
 
@@ -631,23 +663,17 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
                 echo "  Granting Serial Console access to $user (service admin, scoped to $VM_NAME only)..."
 
                 # Virtual Machine User Login - required for Entra ID login at console prompt
-                az role assignment create \
-                    --assignee "$user" \
-                    --role "Virtual Machine User Login" \
-                    --scope "$VM_RESOURCE_ID" \
-                    --output none 2>/dev/null || echo "    Warning: Could not assign VM User Login role (user may not exist or already assigned)"
+                if ! assign_role_with_retry "$user" "Virtual Machine User Login" "$VM_RESOURCE_ID"; then
+                    echo "    Warning: Could not assign VM User Login role (user may not exist or already assigned)"
+                fi
 
-                az role assignment create \
-                    --assignee "$user" \
-                    --role "$CUSTOM_ROLE_NAME" \
-                    --scope "$VM_RESOURCE_ID" \
-                    --output none 2>/dev/null || echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+                if ! assign_role_with_retry "$user" "$CUSTOM_ROLE_NAME" "$VM_RESOURCE_ID"; then
+                    echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
+                fi
 
-                az role assignment create \
-                    --assignee "$user" \
-                    --role "$CUSTOM_ROLE_NAME" \
-                    --scope "$STORAGE_ACCOUNT_ID" \
-                    --output none 2>/dev/null || echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+                if ! assign_role_with_retry "$user" "$CUSTOM_ROLE_NAME" "$STORAGE_ACCOUNT_ID"; then
+                    echo "    Warning: Could not assign storage role (user may not exist or already assigned)"
+                fi
             done
         fi
     fi
@@ -701,11 +727,12 @@ echo ""
 echo "1. Upload your application files via Run Command or AzCopy:"
 echo ""
 echo "   # Example: Download from blob storage"
+echo "   # List containers: az storage container list --account-name $STORAGE_ACCOUNT_NAME --auth-mode login -o table"
 echo "   az vm run-command invoke \\"
 echo "     --resource-group $RESOURCE_GROUP \\"
 echo "     --name $VM_NAME \\"
 echo "     --command-id RunShellScript \\"
-echo "     --scripts 'azcopy copy \"https://<storage>.blob.core.windows.net/<container>/*\" \"/home/$SERVICE_USER/\"'"
+echo "     --scripts 'azcopy copy \"https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/<container>/*\" \"/home/$SERVICE_USER/\"'"
 echo ""
 echo "2. Configure and start your service via Run Command:"
 echo "   az vm run-command invoke \\"
