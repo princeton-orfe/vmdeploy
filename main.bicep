@@ -39,6 +39,9 @@ param storageAccountName string = '${projectName}${uniqueString(resourceGroup().
 @description('Inbound port rules for NSG')
 param inboundPorts array = []
 
+@description('Create a public IP address for the VM')
+param createPublicIp bool = true
+
 var vnetName = '${vmName}-vnet'
 var subnetName = '${vmName}-subnet'
 var nsgName = '${vmName}-nsg'
@@ -138,8 +141,8 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-05-01' = {
   }
 }
 
-// Public IP - Required for VPN client access
-resource publicIp 'Microsoft.Network/publicIPAddresses@2023-05-01' = {
+// Public IP - Optional, for external access
+resource publicIp 'Microsoft.Network/publicIPAddresses@2023-05-01' = if (createPublicIp) {
   name: publicIpName
   location: location
   sku: {
@@ -161,15 +164,19 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-05-01' = {
     ipConfigurations: [
       {
         name: 'ipconfig1'
-        properties: {
-          subnet: {
-            id: vnet.properties.subnets[0].id
-          }
-          privateIPAllocationMethod: 'Dynamic'
-          publicIPAddress: {
-            id: publicIp.id
-          }
-        }
+        properties: union(
+          {
+            subnet: {
+              id: vnet.properties.subnets[0].id
+            }
+            privateIPAllocationMethod: 'Dynamic'
+          },
+          createPublicIp ? {
+            publicIPAddress: {
+              id: publicIp.id
+            }
+          } : {}
+        )
       }
     ]
   }
@@ -404,9 +411,10 @@ resource memoryAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
   }
 }
 
-output vmPublicIp string = publicIp.properties.ipAddress
-output vmFqdn string = publicIp.properties.dnsSettings.fqdn
+output vmPublicIp string = createPublicIp ? publicIp.properties.ipAddress : ''
+output vmFqdn string = createPublicIp ? publicIp.properties.dnsSettings.fqdn : ''
 output vmPrivateIp string = nic.properties.ipConfigurations[0].properties.privateIPAddress
+output hasPublicIp bool = createPublicIp
 output serialConsoleUrl string = 'https://portal.azure.com/#@/resource${vm.id}/serialConsole'
 output runCommandUrl string = 'https://portal.azure.com/#@/resource${vm.id}/runCommand'
 output vmResourceId string = vm.id

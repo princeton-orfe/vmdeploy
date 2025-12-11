@@ -105,6 +105,39 @@ The script will prompt for an admin password (used for Serial Console access).
 | `--parameters FILE` | Parameters JSON for ports, project name, etc. |
 | `--role-definition FILE` | Custom role definition JSON for `--entra-user` |
 
+## In-Place Updates
+
+When you run `deploy.sh` against an existing resource group, you'll be prompted to choose:
+
+- **Update in-place (u)**: Preserves public IP, DNS name, and data disk. Updates VM size, NSG rules, alerts, and Entra ID roles.
+- **Delete and recreate (d)**: Destroys everything and starts fresh (loses all data).
+
+```bash
+# Running against existing deployment prompts for action
+./deploy.sh -g my-resource-group -n my-vm -e alerts@example.com
+
+# Output:
+# Resource group 'my-resource-group' already exists.
+# Options:
+#   u) Update in-place - preserve public IP/DNS, update VM config (recommended)
+#   d) Delete and recreate - destroys everything including data disk
+#   c) Cancel
+```
+
+**What gets updated in-place:**
+- VM size (may require restart)
+- NSG inbound port rules
+- Alert configurations
+- Entra ID role assignments
+
+**What is NOT changed:**
+- Public IP address and DNS name
+- Data disk contents
+- Admin password
+- Cloud-init configuration (use `transfer.sh` for file updates)
+
+This makes it safe to set up a CNAME pointing to your VM's FQDN - the DNS name will survive updates.
+
 ## Tear Down
 
 ```bash
@@ -134,8 +167,17 @@ The script will prompt for an admin password (used for Serial Console access).
 
 **Serial Console** - Interactive terminal via Azure Portal:
 1. Navigate to: VM > Help > Serial console
-2. Login with `azureuser` + password (set during deploy)
+2. Login with local admin username + password (set during deploy)
 3. Or with Entra ID email + password (if `--entra-admin` or `--entra-user` was specified)
+
+**Reset Local Admin Password** - If you need to reset the password:
+```bash
+az vm user update \
+    -g my-resource-group \
+    -n my-vm \
+    -u azureuser \
+    -p 'NewPassword123!'
+```
 
 **Run Command** - Execute scripts without credentials:
 ```bash
@@ -274,6 +316,85 @@ See `SMTP-SETUP.md` for detailed instructions.
 | Standard_D8s_v5 | 8 | 32GB | ~$280 |
 | Standard_D16s_v5 | 16 | 64GB | ~$560 |
 
+## Data Transfer
+
+The `transfer.sh` script transfers files from your local machine (or HPC) to the Azure VM using temporary Blob Storage as an intermediary. The storage container is automatically deleted after transfer to avoid ongoing costs.
+
+### Quick Start
+
+```bash
+# Transfer a directory to the VM
+./transfer.sh -g my-resource-group -n my-vm \
+    -t ./myapp:/home/appuser
+
+# Transfer multiple paths
+./transfer.sh -g my-resource-group -n my-vm \
+    -t ./app:/home/appuser \
+    -t ./data:/home/appuser/data
+
+# With parameters file (reads serviceUser automatically)
+./transfer.sh -g my-resource-group -n my-vm \
+    --parameters ./parameters.json \
+    -t ./app:/home/appuser
+
+# Dry run to preview
+./transfer.sh -g my-resource-group -n my-vm \
+    -t ./app:/home/appuser --dry-run
+```
+
+### How It Works
+
+1. **Creates temporary container** in the deployment's storage account
+2. **Uploads files** from local machine using `azcopy`
+3. **Downloads files** to VM using `azcopy` (via Run Command)
+4. **Sets ownership** to the service user
+5. **Deletes container** automatically (even on error)
+
+### Prerequisites
+
+- `azcopy` installed locally ([installation guide](https://docs.microsoft.com/en-us/azure/storage/common/storage-use-azcopy-v10))
+- VM deployed via `deploy.sh` (uses the boot diagnostics storage account)
+- Azure CLI logged in with access to the resource group
+
+### Transfer Options
+
+| Option | Description |
+|--------|-------------|
+| `-g, --resource-group` | Azure resource group (required) |
+| `-n, --name` | VM name (required) |
+| `-t, --transfer LOCAL:VM` | Transfer path mapping (repeatable) |
+| `--parameters FILE` | Parameters JSON (reads serviceUser) |
+| `--service-user USER` | Override service user (default: appuser) |
+| `--dry-run` | Preview without transferring |
+| `-v, --verbose` | Show detailed progress |
+
+### Example: HFM Database Transfer
+
+For transferring HFM (kdb+/q) application and database files:
+
+```bash
+# After deploying with hfm parameters:
+./transfer.sh -g hfm-rg -n hfm-vm \
+    --parameters ./hfm-parameters.json \
+    -t ./hfm:/home/hfm
+```
+
+This transfers the entire `./hfm/` directory (including `db/` subdirectory) to `/home/hfm/` on the VM, owned by the `hfm` user.
+
+### Cost Considerations
+
+- **No ongoing costs**: The temporary container is deleted immediately after transfer
+- **Transfer costs**: Standard Azure egress/ingress rates apply during transfer
+- **Storage during transfer**: Charged at standard blob storage rates (typically pennies)
+
+### Troubleshooting
+
+**"No storage account found"**: Ensure the VM was deployed with `deploy.sh`, which creates a boot diagnostics storage account.
+
+**Slow transfers**: Large databases may take time. Use `-v` for progress. Consider running from a machine closer to Azure (same region).
+
+**Permission errors**: Ensure your Azure CLI login has `Storage Blob Data Contributor` role on the storage account.
+
 ## Moving Between Subscriptions
 
 To move resources between subscriptions in the same tenant:
@@ -291,6 +412,7 @@ To move resources between subscriptions in the same tenant:
 | File | Purpose |
 |------|---------|
 | `deploy.sh` | Main deployment script |
+| `transfer.sh` | Post-deploy data transfer script |
 | `main.bicep` | Infrastructure as Code (VM, network, alerts) |
 | `cloud-init.yaml` | Generic OS configuration (auto-updates, notifications) |
 | `parameters.json` | Template parameters file (customize for your project) |

@@ -21,6 +21,9 @@ ENTRA_ADMIN=""
 ENTRA_USERS=()
 ENABLE_ENTRA_LOGIN=false
 SERVICE_ADMINS=()
+AUTO_UPDATE=false
+AUTO_YES=false
+NO_PUBLIC_IP=false
 
 # Template files (defaults to files in same directory as script)
 BICEP_FILE="$SCRIPT_DIR/main.bicep"
@@ -46,12 +49,15 @@ Required:
 Actions:
   --destroy                    Tear down all resources in the resource group
   --dry-run                    Show what would happen without making changes
+  --update                     In-place update (skip interactive prompt if RG exists)
+  -y, --yes                    Skip confirmation prompts
 
 VM Options:
   -l, --location LOCATION      Azure region (default: canadacentral)
   -s, --size SIZE              VM size (default: Standard_D8s_v5)
   -d, --disk-size GB           Data disk size in GB (default: 64)
   -u, --admin-user USERNAME    Local admin username (default: azureuser)
+  --no-public-ip               Don't create a public IP (access via VPN/private network only)
 
 Template Options:
   --bicep FILE                 Custom Bicep template (default: ./main.bicep)
@@ -135,6 +141,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --update)
+            AUTO_UPDATE=true
+            shift
+            ;;
+        -y|--yes)
+            AUTO_YES=true
+            shift
+            ;;
+        --no-public-ip)
+            NO_PUBLIC_IP=true
             shift
             ;;
         --entra-admin)
@@ -314,6 +332,11 @@ echo "VM Name: $VM_NAME"
 echo "VM Size: $VM_SIZE"
 echo "Alert Email: $ALERT_EMAIL"
 echo "Data Disk: ${DATA_DISK_SIZE}GB"
+if [[ "$NO_PUBLIC_IP" == "true" ]]; then
+echo "Public IP: No (private network only)"
+else
+echo "Public IP: Yes"
+fi
 echo "Local Admin: $ADMIN_USERNAME"
 echo ""
 echo "Templates:"
@@ -374,7 +397,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "       - Virtual Machine: $VM_NAME ($VM_SIZE)"
     echo "       - OS: Ubuntu 22.04 LTS"
     echo "       - Data Disk: ${DATA_DISK_SIZE}GB Premium SSD"
+    if [[ "$NO_PUBLIC_IP" == "true" ]]; then
+    echo "       - Network: VNet, Subnet, NSG (no public IP)"
+    else
     echo "       - Network: VNet, Subnet, NSG, Public IP"
+    fi
     echo "       - Storage Account (for diagnostics)"
     echo "       - Metric Alerts (availability, CPU, memory)"
     if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
@@ -415,120 +442,211 @@ fi
 
 echo ""
 
-# Prompt for admin password securely
-echo "Enter admin password for Serial Console access"
-echo "(min 12 chars, must include uppercase, lowercase, number, and special char)"
-while true; do
-    read -s -p "Password: " ADMIN_PASSWORD
-    echo
-    read -s -p "Confirm password: " ADMIN_PASSWORD_CONFIRM
-    echo
-    if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD_CONFIRM" ]]; then
-        echo "Passwords do not match. Please try again."
-        continue
-    fi
-    if [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
-        echo "Password must be at least 12 characters. Please try again."
-        continue
-    fi
-    break
-done
-echo ""
+# Check for existing resource group first (affects password prompt)
+UPDATE_MODE=false
+if az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+    echo "Resource group '$RESOURCE_GROUP' already exists."
 
-read -p "Continue with deployment? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Deployment cancelled"
-    exit 0
+    # Handle --update flag for non-interactive mode
+    if [[ "$AUTO_UPDATE" == "true" ]]; then
+        echo ""
+        echo "In-place update mode (--update flag)."
+        echo "  - Public IP and DNS name will be preserved"
+        echo "  - Data disk will be preserved"
+        echo "  - VM size, NSG rules, and alerts can be updated"
+        echo "  - Cloud-init will NOT re-run (use transfer.sh for file updates)"
+        echo ""
+        UPDATE_MODE=true
+    else
+        echo ""
+        echo "Options:"
+        echo "  u) Update in-place - preserve public IP/DNS, update VM config (recommended)"
+        echo "  d) Delete and recreate - destroys everything including data disk"
+        echo "  c) Cancel"
+        echo ""
+        read -p "Choose action [u/d/c]: " -n 1 -r
+        echo
+        case $REPLY in
+            [Uu])
+                echo ""
+                echo "In-place update mode selected."
+                echo "  - Public IP and DNS name will be preserved"
+                echo "  - Data disk will be preserved"
+                echo "  - VM size, NSG rules, and alerts can be updated"
+                echo "  - Cloud-init will NOT re-run (use transfer.sh for file updates)"
+                echo ""
+                UPDATE_MODE=true
+                ;;
+            [Dd])
+                echo ""
+                echo "WARNING: This will delete ALL data including the data disk!"
+                read -p "Are you sure? (y/N) " -n 1 -r
+                echo
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    echo "Deleting existing resource group (this may take a few minutes)..."
+                    az group delete --name "$RESOURCE_GROUP" --yes
+                    echo "Resource group deleted."
+                    UPDATE_MODE=false
+                else
+                    echo "Deployment cancelled"
+                    exit 0
+                fi
+                ;;
+            *)
+                echo "Deployment cancelled"
+                exit 0
+                ;;
+        esac
+    fi
 fi
 
-# Check for existing resource group and tear down if present
-if az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+# Prompt for admin password (only for new deployments)
+if [[ "$UPDATE_MODE" == "false" ]]; then
+    echo "Enter admin password for Serial Console access"
+    echo "(min 12 chars, must include uppercase, lowercase, number, and special char)"
+    while true; do
+        read -s -p "Password: " ADMIN_PASSWORD
+        echo
+        read -s -p "Confirm password: " ADMIN_PASSWORD_CONFIRM
+        echo
+        if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD_CONFIRM" ]]; then
+            echo "Passwords do not match. Please try again."
+            continue
+        fi
+        if [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
+            echo "Password must be at least 12 characters. Please try again."
+            continue
+        fi
+        break
+    done
     echo ""
-    echo "WARNING: Resource group '$RESOURCE_GROUP' already exists."
-    read -p "Delete existing resources and redeploy? (y/N) " -n 1 -r
+else
+    # For updates, we need a placeholder - Bicep won't change existing password
+    ADMIN_PASSWORD="PlaceholderNotUsed123!"
+fi
+
+# Confirmation prompt (skip with --yes flag)
+if [[ "$AUTO_YES" == "true" ]]; then
+    echo "Proceeding with deployment (--yes flag)..."
+else
+    read -p "Continue with deployment? (y/N) " -n 1 -r
     echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Deleting existing resource group (this may take a few minutes)..."
-        az group delete --name "$RESOURCE_GROUP" --yes
-        echo "Resource group deleted."
-    else
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Deployment cancelled"
         exit 0
     fi
 fi
 
-# Process cloud-init template with substitutions
+# Process cloud-init template with substitutions (only for new deployments)
 CLOUD_INIT_PROCESSED=$(mktemp)
+CLOUD_INIT_BASE64=""
 
-# Build comma-separated list of service admin usernames
-# Entra ID login uses full email as Linux username (e.g., bino@princeton.edu)
-SERVICE_ADMIN_USERS=""
-if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
-    for admin in "${SERVICE_ADMINS[@]}"; do
-        if [[ -z "$SERVICE_ADMIN_USERS" ]]; then
-            SERVICE_ADMIN_USERS="$admin"
-        else
-            SERVICE_ADMIN_USERS="$SERVICE_ADMIN_USERS,$admin"
-        fi
-    done
+if [[ "$UPDATE_MODE" == "false" ]]; then
+    # Build comma-separated list of service admin usernames
+    # Entra ID login uses full email as Linux username (e.g., bino@princeton.edu)
+    SERVICE_ADMIN_USERS=""
+    if [[ ${#SERVICE_ADMINS[@]} -gt 0 ]]; then
+        for admin in "${SERVICE_ADMINS[@]}"; do
+            if [[ -z "$SERVICE_ADMIN_USERS" ]]; then
+                SERVICE_ADMIN_USERS="$admin"
+            else
+                SERVICE_ADMIN_USERS="$SERVICE_ADMIN_USERS,$admin"
+            fi
+        done
+    fi
+
+    # Substitute variables in cloud-init template
+    sed -e "s/\${ALERT_EMAIL}/$ALERT_EMAIL/g" \
+        -e "s/\${SERVICE_USER}/$SERVICE_USER/g" \
+        -e "s/\${SERVICE_ADMIN_USERS}/$SERVICE_ADMIN_USERS/g" \
+        "$CLOUD_INIT_FILE" > "$CLOUD_INIT_PROCESSED"
+
+    # Base64 encode cloud-init for passing to Bicep
+    CLOUD_INIT_BASE64=$(base64 -i "$CLOUD_INIT_PROCESSED" | tr -d '\n')
 fi
 
-# Substitute variables in cloud-init template
-sed -e "s/\${ALERT_EMAIL}/$ALERT_EMAIL/g" \
-    -e "s/\${SERVICE_USER}/$SERVICE_USER/g" \
-    -e "s/\${SERVICE_ADMIN_USERS}/$SERVICE_ADMIN_USERS/g" \
-    "$CLOUD_INIT_FILE" > "$CLOUD_INIT_PROCESSED"
-
-# Base64 encode cloud-init for passing to Bicep
-CLOUD_INIT_BASE64=$(base64 -i "$CLOUD_INIT_PROCESSED" | tr -d '\n')
-
 echo ""
-echo "Step 1/4: Creating resource group..."
+if [[ "$UPDATE_MODE" == "true" ]]; then
+    echo "Step 1/3: Updating resource group..."
+else
+    echo "Step 1/4: Creating resource group..."
+fi
 az group create \
     --name "$RESOURCE_GROUP" \
     --location "$LOCATION" \
     --output none
 
-echo "Step 2/4: Deploying infrastructure (this takes 3-5 minutes)..."
-DEPLOYMENT_OUTPUT=$(az deployment group create \
-    --resource-group "$RESOURCE_GROUP" \
-    --template-file "$BICEP_FILE" \
-    --parameters \
-        vmName="$VM_NAME" \
-        vmSize="$VM_SIZE" \
-        alertEmail="$ALERT_EMAIL" \
-        dataDiskSizeGB="$DATA_DISK_SIZE" \
-        adminUsername="$ADMIN_USERNAME" \
-        adminPassword="$ADMIN_PASSWORD" \
-        enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
-        projectName="$PROJECT_NAME" \
-        inboundPorts="$INBOUND_PORTS_JSON" \
-        customData="$CLOUD_INIT_BASE64" \
-    --output json)
+# Convert NO_PUBLIC_IP to createPublicIp boolean for Bicep
+if [[ "$NO_PUBLIC_IP" == "true" ]]; then
+    CREATE_PUBLIC_IP="false"
+else
+    CREATE_PUBLIC_IP="true"
+fi
 
-VM_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPublicIp.value')
-VM_FQDN=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmFqdn.value')
+if [[ "$UPDATE_MODE" == "true" ]]; then
+    echo "Step 2/3: Updating infrastructure..."
+    # For updates, don't pass customData - it can't be changed on existing VM
+    DEPLOYMENT_OUTPUT=$(az deployment group create \
+        --resource-group "$RESOURCE_GROUP" \
+        --template-file "$BICEP_FILE" \
+        --parameters \
+            vmName="$VM_NAME" \
+            vmSize="$VM_SIZE" \
+            alertEmail="$ALERT_EMAIL" \
+            dataDiskSizeGB="$DATA_DISK_SIZE" \
+            adminUsername="$ADMIN_USERNAME" \
+            adminPassword="$ADMIN_PASSWORD" \
+            enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
+            projectName="$PROJECT_NAME" \
+            inboundPorts="$INBOUND_PORTS_JSON" \
+            createPublicIp="$CREATE_PUBLIC_IP" \
+        --output json)
+else
+    echo "Step 2/4: Deploying infrastructure (this takes 3-5 minutes)..."
+    DEPLOYMENT_OUTPUT=$(az deployment group create \
+        --resource-group "$RESOURCE_GROUP" \
+        --template-file "$BICEP_FILE" \
+        --parameters \
+            vmName="$VM_NAME" \
+            vmSize="$VM_SIZE" \
+            alertEmail="$ALERT_EMAIL" \
+            dataDiskSizeGB="$DATA_DISK_SIZE" \
+            adminUsername="$ADMIN_USERNAME" \
+            adminPassword="$ADMIN_PASSWORD" \
+            enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
+            projectName="$PROJECT_NAME" \
+            inboundPorts="$INBOUND_PORTS_JSON" \
+            createPublicIp="$CREATE_PUBLIC_IP" \
+            customData="$CLOUD_INIT_BASE64" \
+        --output json)
+fi
+
+VM_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPublicIp.value // empty')
+VM_FQDN=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmFqdn.value // empty')
+VM_PRIVATE_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPrivateIp.value // empty')
+HAS_PUBLIC_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.hasPublicIp.value // true')
 SERIAL_CONSOLE_URL=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.serialConsoleUrl.value')
 RUN_COMMAND_URL=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.runCommandUrl.value')
 
-echo "Step 3/4: Applying cloud-init configuration..."
-az vm extension set \
-    --resource-group "$RESOURCE_GROUP" \
-    --vm-name "$VM_NAME" \
-    --name customScript \
-    --publisher Microsoft.Azure.Extensions \
-    --settings "{\"commandToExecute\": \"cloud-init status --wait\"}" \
-    --output none 2>/dev/null || true
+# Cloud-init steps only for new deployments
+if [[ "$UPDATE_MODE" == "false" ]]; then
+    echo "Step 3/4: Applying cloud-init configuration..."
+    az vm extension set \
+        --resource-group "$RESOURCE_GROUP" \
+        --vm-name "$VM_NAME" \
+        --name customScript \
+        --publisher Microsoft.Azure.Extensions \
+        --settings "{\"commandToExecute\": \"cloud-init status --wait\"}" \
+        --output none 2>/dev/null || true
 
-# Apply cloud-init via custom data on a new VM or run it manually
-echo "Step 4/4: Running cloud-init setup..."
-az vm run-command invoke \
-    --resource-group "$RESOURCE_GROUP" \
-    --name "$VM_NAME" \
-    --command-id RunShellScript \
-    --scripts "cloud-init status --wait && echo 'Cloud-init complete'" \
-    --output none 2>/dev/null || true
+    echo "Step 4/4: Running cloud-init setup..."
+    az vm run-command invoke \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$VM_NAME" \
+        --command-id RunShellScript \
+        --scripts "cloud-init status --wait && echo 'Cloud-init complete'" \
+        --output none 2>/dev/null || true
+fi
 
 # Clean up temp file
 rm -f "$CLOUD_INIT_PROCESSED"
@@ -565,7 +683,11 @@ assign_role_with_retry() {
 # Assign Entra ID roles if specified
 if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
     echo ""
-    echo "Step 5/5: Configuring Entra ID access..."
+    if [[ "$UPDATE_MODE" == "true" ]]; then
+        echo "Step 3/3: Configuring Entra ID access..."
+    else
+        echo "Step 5/5: Configuring Entra ID access..."
+    fi
 
     # Get storage account ID for role scoping
     STORAGE_ACCOUNT_NAME=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.storageAccountName.value // empty')
@@ -681,15 +803,26 @@ fi
 
 echo ""
 echo "========================================"
-echo "Deployment Complete!"
+if [[ "$UPDATE_MODE" == "true" ]]; then
+    echo "Update Complete!"
+else
+    echo "Deployment Complete!"
+fi
 echo "========================================"
 echo ""
+if [[ "$HAS_PUBLIC_IP" == "true" && -n "$VM_IP" ]]; then
 echo "VM Public IP: $VM_IP"
 echo "VM FQDN: $VM_FQDN"
+else
+echo "VM Private IP: $VM_PRIVATE_IP"
+echo "(No public IP - access via VPN/private network only)"
+fi
 echo ""
+if [[ "$UPDATE_MODE" == "false" ]]; then
 echo "Local Admin (has sudo):"
 echo "  Username: $ADMIN_USERNAME"
 echo "  Password: (as entered during setup)"
+fi
 if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
 echo ""
 echo "Entra ID Login:"
@@ -712,7 +845,11 @@ fi
 if [[ -n "$SERVICE_PORTS" ]]; then
 echo ""
 echo "Service Connection:"
+if [[ "$HAS_PUBLIC_IP" == "true" && -n "$VM_FQDN" ]]; then
 echo "  Host: $VM_FQDN"
+else
+echo "  Host: $VM_PRIVATE_IP (via VPN/private network)"
+fi
 echo "  Ports: $SERVICE_PORTS"
 fi
 echo ""
@@ -721,18 +858,32 @@ echo "  Serial Console: $SERIAL_CONSOLE_URL"
 echo "  Run Command: $RUN_COMMAND_URL"
 echo ""
 echo "========================================"
+if [[ "$UPDATE_MODE" == "true" ]]; then
+echo "Update Summary"
+echo "========================================"
+echo ""
+echo "The following were updated (if changed):"
+echo "  - VM size: $VM_SIZE"
+echo "  - NSG inbound port rules"
+echo "  - Alert configurations"
+echo "  - Entra ID role assignments"
+echo ""
+echo "NOT changed:"
+if [[ "$HAS_PUBLIC_IP" == "true" ]]; then
+echo "  - Public IP and DNS (preserved)"
+fi
+echo "  - Data disk contents"
+echo "  - Admin password"
+echo "  - Cloud-init configuration"
+echo ""
+echo "To update application files, use transfer.sh:"
+echo "  ./transfer.sh -g $RESOURCE_GROUP -n $VM_NAME -t ./app:/home/$SERVICE_USER"
+else
 echo "Next Steps"
 echo "========================================"
 echo ""
-echo "1. Upload your application files via Run Command or AzCopy:"
-echo ""
-echo "   # Example: Download from blob storage"
-echo "   # List containers: az storage container list --account-name $STORAGE_ACCOUNT_NAME --auth-mode login -o table"
-echo "   az vm run-command invoke \\"
-echo "     --resource-group $RESOURCE_GROUP \\"
-echo "     --name $VM_NAME \\"
-echo "     --command-id RunShellScript \\"
-echo "     --scripts 'azcopy copy \"https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/<container>/*\" \"/home/$SERVICE_USER/\"'"
+echo "1. Upload your application files via transfer.sh:"
+echo "   ./transfer.sh -g $RESOURCE_GROUP -n $VM_NAME -t ./app:/home/$SERVICE_USER"
 echo ""
 echo "2. Configure and start your service via Run Command:"
 echo "   az vm run-command invoke \\"
@@ -743,5 +894,6 @@ echo "     --scripts 'chown -R $SERVICE_USER:$SERVICE_USER /home/$SERVICE_USER'"
 echo ""
 echo "3. (Optional) Configure SMTP for email alerts:"
 echo "   See azure/SMTP-SETUP.md for SendGrid configuration"
+fi
 echo ""
 echo "========================================"
