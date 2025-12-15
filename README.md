@@ -170,14 +170,17 @@ This makes it safe to set up a CNAME pointing to your VM's FQDN - the DNS name w
 2. Login with local admin username + password (set during deploy)
 3. Or with Entra ID email + password (if `--entra-admin` or `--entra-user` was specified)
 
-**Reset Local Admin Password** - If you need to reset the password:
+**Reset Local Admin Password** - The deployment script may fail to set the admin password correctly. If you cannot log in with the password entered during deployment, reset it:
+
 ```bash
 az vm user update \
-    -g my-resource-group \
-    -n my-vm \
-    -u azureuser \
-    -p 'NewPassword123!'
+    --resource-group my-resource-group \
+    --name my-vm \
+    --username <admin-username> \
+    --password 'NewPassword123!'
 ```
+
+Password requirements: minimum 12 characters, must include uppercase, lowercase, number, and special character.
 
 **Run Command** - Execute scripts without credentials:
 ```bash
@@ -512,3 +515,19 @@ This allows you to:
 - Customize cloud-init for application-specific setup
 - Configure ports and network rules via parameters file
 - Define custom RBAC roles with specific permissions
+
+## Troubleshooting
+
+### Cannot Login with Admin Password
+
+The deployment script may fail to set the local admin password correctly. If you cannot log in via Serial Console with the password you entered during deployment:
+
+```bash
+az vm user update \
+    --resource-group <resource-group> \
+    --name <vm-name> \
+    --username <admin-username> \
+    --password 'YourNewPassword123!'
+```
+
+This uses the Azure VM Access extension to reset the password. The command takes 1-2 minutes to complete.
