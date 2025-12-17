@@ -218,6 +218,38 @@ if ! az account show &> /dev/null; then
     az login
 fi
 
+# Check EncryptionAtHost feature if CMK is enabled
+if [[ "$ENABLE_CMK" == "true" ]]; then
+    ENCRYPTION_FEATURE_STATE=$(az feature show --namespace Microsoft.Compute --name EncryptionAtHost --query properties.state -o tsv 2>/dev/null || echo "Unknown")
+    if [[ "$ENCRYPTION_FEATURE_STATE" != "Registered" ]]; then
+        echo ""
+        echo "Warning: CMK encryption requires the 'EncryptionAtHost' feature."
+        echo "Current status: $ENCRYPTION_FEATURE_STATE"
+        echo ""
+        read -p "Register the EncryptionAtHost feature now? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Registering EncryptionAtHost feature..."
+            az feature register --namespace Microsoft.Compute --name EncryptionAtHost --output none
+            echo "Propagating provider registration..."
+            az provider register -n Microsoft.Compute --output none
+            echo -n "Waiting for registration to complete"
+            while [[ "$(az provider show -n Microsoft.Compute --query registrationState -o tsv)" != "Registered" ]]; do
+                sleep 5
+                echo -n "."
+            done
+            echo " Done!"
+            echo ""
+        else
+            echo ""
+            echo "You can either:"
+            echo "  1. Run with --no-cmk to disable encryption at host"
+            echo "  2. Manually register: az feature register --namespace Microsoft.Compute --name EncryptionAtHost"
+            exit 1
+        fi
+    fi
+fi
+
 # Handle destroy mode
 if [[ "$DESTROY" == "true" ]]; then
     RG_EXISTS=false
@@ -382,7 +414,6 @@ if [[ "$ENABLE_CMK" == "true" ]]; then
 echo "  - Encryption: Customer-Managed Keys (CMK) enabled"
 echo "    - Disk encryption at host"
 echo "    - OS and data disks encrypted with CMK"
-echo "    - Storage account encrypted with CMK"
 else
 echo "  - Encryption: Platform-managed keys only"
 fi
@@ -903,7 +934,6 @@ echo "Encryption (CMK):"
 echo "  Key Vault: $KEY_VAULT_NAME"
 echo "  Disks: Encrypted with customer-managed keys"
 echo "  Encryption at Host: Enabled"
-echo "  Storage: Encrypted with customer-managed keys"
 echo ""
 fi
 echo "========================================"

@@ -185,49 +185,15 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-05-01' = {
   }
 }
 
-// Storage Account for diagnostics
+// Storage Account for diagnostics (uses platform-managed encryption)
+// Note: Boot diagnostics storage is low-sensitivity; CMK applied to VM disks which contain actual data
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
-  dependsOn: enableCMK ? [storageKeyVaultAccess] : []
   sku: {
     name: 'Standard_LRS'
   }
   kind: 'StorageV2'
-  identity: enableCMK ? {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${storageIdentity.id}': {}
-    }
-  } : null
-  properties: enableCMK ? {
-    encryption: {
-      keySource: 'Microsoft.Keyvault'
-      keyvaultproperties: {
-        keyname: keyVaultKey.name
-        keyvaulturi: keyVault.properties.vaultUri
-      }
-      identity: {
-        userAssignedIdentity: storageIdentity.id
-      }
-      services: {
-        blob: {
-          enabled: true
-          keyType: 'Account'
-        }
-        file: {
-          enabled: true
-          keyType: 'Account'
-        }
-      }
-    }
-  } : {}
-}
-
-// User-assigned managed identity for storage account CMK access
-resource storageIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enableCMK) {
-  name: '${vmName}-storage-identity'
-  location: location
 }
 
 // Key Vault for CMK encryption
@@ -291,17 +257,6 @@ resource diskEncryptionSetKeyVaultAccess 'Microsoft.Authorization/roleAssignment
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e147488a-f6f5-4113-8e2d-b22465e65bf6') // Key Vault Crypto Service Encryption User
     principalId: diskEncryptionSet.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Role assignment: Grant Storage Identity access to Key Vault for CMK
-resource storageKeyVaultAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableCMK) {
-  name: guid(keyVault.id, storageIdentity.id, 'Key Vault Crypto Service Encryption User')
-  scope: keyVault
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e147488a-f6f5-4113-8e2d-b22465e65bf6') // Key Vault Crypto Service Encryption User
-    principalId: storageIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
 }
