@@ -42,6 +42,9 @@ param inboundPorts array = []
 @description('Create a public IP address for the VM')
 param createPublicIp bool = true
 
+@description('Enable customer-managed key (CMK) encryption for disks and storage')
+param enableCMK bool = true
+
 var vnetName = '${vmName}-vnet'
 var subnetName = '${vmName}-subnet'
 var nsgName = '${vmName}-nsg'
@@ -186,16 +189,128 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-05-01' = {
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
+  dependsOn: enableCMK ? [storageKeyVaultAccess] : []
   sku: {
     name: 'Standard_LRS'
   }
   kind: 'StorageV2'
+  identity: enableCMK ? {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${storageIdentity.id}': {}
+    }
+  } : null
+  properties: enableCMK ? {
+    encryption: {
+      keySource: 'Microsoft.Keyvault'
+      keyvaultproperties: {
+        keyname: keyVaultKey.name
+        keyvaulturi: keyVault.properties.vaultUri
+      }
+      identity: {
+        userAssignedIdentity: storageIdentity.id
+      }
+      services: {
+        blob: {
+          enabled: true
+          keyType: 'Account'
+        }
+        file: {
+          enabled: true
+          keyType: 'Account'
+        }
+      }
+    }
+  } : {}
+}
+
+// User-assigned managed identity for storage account CMK access
+resource storageIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enableCMK) {
+  name: '${vmName}-storage-identity'
+  location: location
+}
+
+// Key Vault for CMK encryption
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = if (enableCMK) {
+  name: '${projectName}-${uniqueString(resourceGroup().id)}-kv'
+  location: location
+  properties: {
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    enabledForDiskEncryption: true
+    enabledForDeployment: true
+    enabledForTemplateDeployment: true
+    enablePurgeProtection: true
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 7
+    enableRbacAuthorization: true
+  }
+}
+
+// Key Vault encryption key for disk encryption
+resource keyVaultKey 'Microsoft.KeyVault/vaults/keys@2023-07-01' = if (enableCMK) {
+  parent: keyVault
+  name: '${vmName}-disk-encryption-key'
+  properties: {
+    kty: 'RSA'
+    keySize: 4096
+    keyOps: [
+      'encrypt'
+      'decrypt'
+      'wrapKey'
+      'unwrapKey'
+    ]
+  }
+}
+
+// Disk Encryption Set for VM disks
+resource diskEncryptionSet 'Microsoft.Compute/diskEncryptionSets@2023-10-02' = if (enableCMK) {
+  name: '${vmName}-disk-encryption-set'
+  location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    activeKey: {
+      sourceVault: {
+        id: keyVault.id
+      }
+      keyUrl: keyVaultKey.properties.keyUriWithVersion
+    }
+    encryptionType: 'EncryptionAtRestWithCustomerKey'
+  }
+}
+
+// Role assignment: Grant Disk Encryption Set access to Key Vault
+resource diskEncryptionSetKeyVaultAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableCMK) {
+  name: guid(keyVault.id, diskEncryptionSet.id, 'Key Vault Crypto Service Encryption User')
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e147488a-f6f5-4113-8e2d-b22465e65bf6') // Key Vault Crypto Service Encryption User
+    principalId: diskEncryptionSet.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Role assignment: Grant Storage Identity access to Key Vault for CMK
+resource storageKeyVaultAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableCMK) {
+  name: guid(keyVault.id, storageIdentity.id, 'Key Vault Crypto Service Encryption User')
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e147488a-f6f5-4113-8e2d-b22465e65bf6') // Key Vault Crypto Service Encryption User
+    principalId: storageIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
 }
 
 // Virtual Machine
 resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
   name: vmName
   location: location
+  dependsOn: enableCMK ? [diskEncryptionSetKeyVaultAccess] : []
   identity: enableEntraSSH ? {
     type: 'SystemAssigned'
   } : null
@@ -203,6 +318,9 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
     hardwareProfile: {
       vmSize: vmSize
     }
+    securityProfile: enableCMK ? {
+      encryptionAtHost: true
+    } : null
     osProfile: {
       computerName: vmName
       adminUsername: adminUsername
@@ -231,7 +349,12 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
         name: osDiskName
         caching: 'ReadWrite'
         createOption: 'FromImage'
-        managedDisk: {
+        managedDisk: enableCMK ? {
+          storageAccountType: 'Premium_LRS'
+          diskEncryptionSet: {
+            id: diskEncryptionSet.id
+          }
+        } : {
           storageAccountType: 'Premium_LRS'
         }
       }
@@ -242,7 +365,12 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
           lun: 0
           createOption: 'Empty'
           caching: 'ReadOnly'
-          managedDisk: {
+          managedDisk: enableCMK ? {
+            storageAccountType: 'Premium_LRS'
+            diskEncryptionSet: {
+              id: diskEncryptionSet.id
+            }
+          } : {
             storageAccountType: 'Premium_LRS'
           }
         }
@@ -422,3 +550,6 @@ output entraSSHEnabled bool = enableEntraSSH
 output sshAccessEnabled bool = enableSSHAccess
 output adminUsername string = adminUsername
 output storageAccountName string = storageAccount.name
+output cmkEnabled bool = enableCMK
+output keyVaultName string = enableCMK ? keyVault.name : ''
+output diskEncryptionSetName string = enableCMK ? diskEncryptionSet.name : ''

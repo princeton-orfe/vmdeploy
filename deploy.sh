@@ -24,6 +24,7 @@ SERVICE_ADMINS=()
 AUTO_UPDATE=false
 AUTO_YES=false
 NO_PUBLIC_IP=false
+ENABLE_CMK=true
 
 # Template files (defaults to files in same directory as script)
 BICEP_FILE="$SCRIPT_DIR/main.bicep"
@@ -58,6 +59,7 @@ VM Options:
   -d, --disk-size GB           Data disk size in GB (default: 64)
   -u, --admin-user USERNAME    Local admin username (default: azureuser)
   --no-public-ip               Don't create a public IP (access via VPN/private network only)
+  --no-cmk                     Disable customer-managed key encryption (CMK enabled by default)
 
 Template Options:
   --bicep FILE                 Custom Bicep template (default: ./main.bicep)
@@ -155,6 +157,10 @@ while [[ $# -gt 0 ]]; do
             NO_PUBLIC_IP=true
             shift
             ;;
+        --no-cmk)
+            ENABLE_CMK=false
+            shift
+            ;;
         --entra-admin)
             ENTRA_ADMIN="$2"
             ENABLE_ENTRA_LOGIN=true
@@ -234,6 +240,7 @@ if [[ "$DESTROY" == "true" ]]; then
     echo "  - Disks (OS and data)"
     echo "  - Network resources"
     echo "  - Storage account"
+    echo "  - Key Vault (if CMK enabled)"
     echo "  - Alerts and action groups"
     echo "========================================"
 
@@ -261,10 +268,24 @@ if [[ "$DESTROY" == "true" ]]; then
         exit 0
     fi
 
+    # Find any Key Vaults in the resource group before deletion (for purging)
+    KEY_VAULTS=$(az keyvault list --resource-group "$RESOURCE_GROUP" --query "[].name" -o tsv 2>/dev/null || echo "")
+
     echo ""
     echo "Deleting resource group '$RESOURCE_GROUP'..."
     echo "(This may take a few minutes)"
     az group delete --name "$RESOURCE_GROUP" --yes
+
+    # Purge soft-deleted Key Vaults to allow immediate redeployment
+    if [[ -n "$KEY_VAULTS" ]]; then
+        echo ""
+        echo "Purging soft-deleted Key Vault(s) to allow redeployment..."
+        for kv in $KEY_VAULTS; do
+            echo "  Purging: $kv"
+            az keyvault purge --name "$kv" 2>/dev/null || echo "    (already purged or not found)"
+        done
+    fi
+
     echo ""
     echo "========================================"
     echo "Tear down complete!"
@@ -357,6 +378,14 @@ echo "  Service Ports: $SERVICE_PORTS"
 fi
 echo ""
 echo "Security:"
+if [[ "$ENABLE_CMK" == "true" ]]; then
+echo "  - Encryption: Customer-Managed Keys (CMK) enabled"
+echo "    - Disk encryption at host"
+echo "    - OS and data disks encrypted with CMK"
+echo "    - Storage account encrypted with CMK"
+else
+echo "  - Encryption: Platform-managed keys only"
+fi
 echo "  - SSH: BLOCKED"
 if [[ "$INBOUND_PORTS_JSON" != "[]" ]]; then
 echo "  - Inbound Ports: (from parameters file)"
@@ -404,6 +433,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     fi
     echo "       - Storage Account (for diagnostics)"
     echo "       - Metric Alerts (availability, CPU, memory)"
+    if [[ "$ENABLE_CMK" == "true" ]]; then
+        echo "       - Key Vault (for encryption keys)"
+        echo "       - Disk Encryption Set (CMK)"
+        echo "       - Encryption at host enabled"
+    fi
     if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
         echo "       - AADSSHLoginForLinux extension"
     fi
@@ -600,9 +634,13 @@ if [[ "$UPDATE_MODE" == "true" ]]; then
             projectName="$PROJECT_NAME" \
             inboundPorts="$INBOUND_PORTS_JSON" \
             createPublicIp="$CREATE_PUBLIC_IP" \
+            enableCMK="$ENABLE_CMK" \
         --output json)
 else
     echo "Step 2/4: Deploying infrastructure (this takes 3-5 minutes)..."
+    if [[ "$ENABLE_CMK" == "true" ]]; then
+        echo "  (CMK encryption adds ~2 minutes for Key Vault and encryption setup)"
+    fi
     DEPLOYMENT_OUTPUT=$(az deployment group create \
         --resource-group "$RESOURCE_GROUP" \
         --template-file "$BICEP_FILE" \
@@ -617,6 +655,7 @@ else
             projectName="$PROJECT_NAME" \
             inboundPorts="$INBOUND_PORTS_JSON" \
             createPublicIp="$CREATE_PUBLIC_IP" \
+            enableCMK="$ENABLE_CMK" \
             customData="$CLOUD_INIT_BASE64" \
         --output json)
 fi
@@ -627,6 +666,8 @@ VM_PRIVATE_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPrivate
 HAS_PUBLIC_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.hasPublicIp.value // true')
 SERIAL_CONSOLE_URL=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.serialConsoleUrl.value')
 RUN_COMMAND_URL=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.runCommandUrl.value')
+CMK_ENABLED=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.cmkEnabled.value // false')
+KEY_VAULT_NAME=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.keyVaultName.value // empty')
 
 # Cloud-init steps only for new deployments
 if [[ "$UPDATE_MODE" == "false" ]]; then
@@ -857,6 +898,14 @@ echo "Console Access (Azure Portal):"
 echo "  Serial Console: $SERIAL_CONSOLE_URL"
 echo "  Run Command: $RUN_COMMAND_URL"
 echo ""
+if [[ "$CMK_ENABLED" == "true" ]]; then
+echo "Encryption (CMK):"
+echo "  Key Vault: $KEY_VAULT_NAME"
+echo "  Disks: Encrypted with customer-managed keys"
+echo "  Encryption at Host: Enabled"
+echo "  Storage: Encrypted with customer-managed keys"
+echo ""
+fi
 echo "========================================"
 if [[ "$UPDATE_MODE" == "true" ]]; then
 echo "Update Summary"
