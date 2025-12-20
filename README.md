@@ -162,6 +162,55 @@ This makes it safe to set up a CNAME pointing to your VM's FQDN - the DNS name w
 - **SSH Port**: Blocked at firewall level by default
 - **Console Access**: Azure Portal Serial Console or Run Command (RBAC-authenticated)
 - **Entra ID Login**: Optional - allows users to authenticate with their Entra credentials
+- **Disk Encryption**: Customer-managed keys (CMK) with encryption at host (enabled by default)
+- **Storage**: Shared key access disabled; uses Entra ID authentication only
+- **Key Vault**: Diagnostic logging enabled for audit compliance
+- **Guest Configuration**: Azure Policy guest configuration extension installed
+
+### Azure Secure Score Compliance
+
+This deployment addresses the following Azure Security Center recommendations:
+
+| Recommendation | How Addressed |
+|----------------|---------------|
+| Guest Configuration extension should be installed | AzurePolicyforLinux extension auto-installed |
+| Storage accounts should prevent shared key access | `allowSharedKeyAccess: false` on storage account |
+| Linux VMs should enable Azure Disk Encryption or EncryptionAtHost | `encryptionAtHost: true` when CMK enabled |
+| Diagnostic logs in Key Vault should be enabled | Log Analytics workspace with audit logs configured |
+
+### Subscription-Level Security Settings
+
+Some security recommendations require subscription-level configuration. Use the provided script:
+
+```bash
+# Configure security contact for the subscription
+./configure-security-contacts.sh -e security@example.com
+
+# With phone number
+./configure-security-contacts.sh -e security@example.com --phone "+1-555-123-4567"
+
+# Dry run to preview
+./configure-security-contacts.sh -e security@example.com --dry-run
+```
+
+This addresses:
+- Email notification to subscription owner for high severity alerts
+- Subscriptions should have a contact email address for security issues
+- Email notification for high severity alerts should be enabled
+
+### Guest Accounts
+
+The recommendation "Guest accounts with read permissions on Azure resources should be removed" requires manual review:
+
+```bash
+# List guest users in your Entra ID tenant
+az ad user list --filter "userType eq 'Guest'" -o table
+
+# Check role assignments for a specific guest
+az role assignment list --assignee "guest@external.com" -o table
+```
+
+Remove unnecessary guest access via Azure Portal > Entra ID > Users, or using `az role assignment delete`.
 
 ## Console Access
 
@@ -416,6 +465,7 @@ To move resources between subscriptions in the same tenant:
 |------|---------|
 | `deploy.sh` | Main deployment script |
 | `transfer.sh` | Post-deploy data transfer script |
+| `configure-security-contacts.sh` | Configure subscription security contact settings |
 | `main.bicep` | Infrastructure as Code (VM, network, alerts) |
 | `cloud-init.yaml` | Generic OS configuration (auto-updates, notifications) |
 | `parameters.json` | Template parameters file (customize for your project) |

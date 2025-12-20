@@ -726,6 +726,20 @@ rm -f "$CLOUD_INIT_PROCESSED"
 # Get VM resource ID and subscription for role assignments
 VM_RESOURCE_ID=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmResourceId.value')
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+STORAGE_ACCOUNT_NAME_OUTPUT=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.storageAccountName.value // empty')
+
+# Assign Storage Blob Data Contributor to current user for transfer.sh support
+# This is required because storage account has shared key access disabled
+echo "Granting storage data access to current user for file transfers..."
+CURRENT_USER=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || echo "")
+if [[ -n "$CURRENT_USER" && -n "$STORAGE_ACCOUNT_NAME_OUTPUT" ]]; then
+    STORAGE_ACCOUNT_RESOURCE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME_OUTPUT"
+    az role assignment create \
+        --assignee "$CURRENT_USER" \
+        --role "Storage Blob Data Contributor" \
+        --scope "$STORAGE_ACCOUNT_RESOURCE_ID" \
+        --output none 2>/dev/null || echo "  (Storage Blob Data Contributor role may already be assigned)"
+fi
 
 # Helper function to assign role with retry
 assign_role_with_retry() {
@@ -800,6 +814,7 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
                 echo "$ROLE_DEF" | az role definition create --role-definition @- --output none 2>/dev/null || echo "    Warning: Could not create custom role (may already exist)"
             else
                 # Create default role definition scoped to specific VM and storage account
+                # Note: listKeys not needed since storage account uses Entra ID auth (shared key access disabled)
                 az role definition create --role-definition "{
                     \"Name\": \"$CUSTOM_ROLE_NAME\",
                     \"Description\": \"Minimum permissions for Serial Console access with Entra ID login to $VM_NAME only\",
@@ -807,7 +822,6 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
                         \"Microsoft.Compute/virtualMachines/read\",
                         \"Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action\",
                         \"Microsoft.Storage/storageAccounts/read\",
-                        \"Microsoft.Storage/storageAccounts/listKeys/action\",
                         \"Microsoft.SerialConsole/serialPorts/connect/action\",
                         \"Microsoft.Resources/subscriptions/resourceGroups/read\"
                     ],

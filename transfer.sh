@@ -427,19 +427,27 @@ log "Step 2/${#LOCAL_PATHS[@]}+3: Uploading files to blob storage..."
 SAS_EXPIRY=$(date -u -v+1H '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')
 verbose "Generating SAS token (expires: $SAS_EXPIRY)..."
 
-# Get account key for SAS generation (more reliable than user delegation)
-ACCOUNT_KEY=$(az storage account keys list \
-    --resource-group "$RESOURCE_GROUP" \
-    --account-name "$STORAGE_ACCOUNT" \
-    --query "[0].value" -o tsv)
-
+# Use user delegation SAS (Entra ID-based, no shared keys required)
+# This requires the user to have Storage Blob Data Contributor role on the storage account
+verbose "Generating user delegation SAS token..."
 SAS_TOKEN=$(az storage container generate-sas \
     --name "$CONTAINER_NAME" \
     --account-name "$STORAGE_ACCOUNT" \
-    --account-key "$ACCOUNT_KEY" \
+    --as-user \
+    --auth-mode login \
     --permissions rwdl \
     --expiry "$SAS_EXPIRY" \
-    -o tsv)
+    -o tsv 2>/dev/null) || {
+    echo ""
+    echo "Error: Failed to generate user delegation SAS token."
+    echo "This requires 'Storage Blob Data Contributor' role on the storage account."
+    echo ""
+    echo "To fix this, assign the role to yourself:"
+    echo "  az role assignment create --assignee <your-email> \\"
+    echo "    --role 'Storage Blob Data Contributor' \\"
+    echo "    --scope /subscriptions/<sub>/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT"
+    exit 1
+}
 
 BLOB_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER_NAME}"
 

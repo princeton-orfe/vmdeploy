@@ -45,6 +45,13 @@ param createPublicIp bool = true
 @description('Enable customer-managed key (CMK) encryption for disks and storage')
 param enableCMK bool = true
 
+@description('Unique suffix for Key Vault name to avoid soft-delete conflicts (auto-generated if empty)')
+param keyVaultSuffix string = ''
+
+// Generate a unique suffix for Key Vault if not provided
+// Uses deployment timestamp to ensure uniqueness across deployments
+var kvSuffix = empty(keyVaultSuffix) ? substring(uniqueString(resourceGroup().id, deployment().name), 0, 6) : keyVaultSuffix
+
 var vnetName = '${vmName}-vnet'
 var subnetName = '${vmName}-subnet'
 var nsgName = '${vmName}-nsg'
@@ -194,11 +201,17 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
     name: 'Standard_LRS'
   }
   kind: 'StorageV2'
+  properties: {
+    allowSharedKeyAccess: false
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+  }
 }
 
 // Key Vault for CMK encryption
+// Name includes unique suffix to avoid conflicts with soft-deleted vaults
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = if (enableCMK) {
-  name: '${projectName}-${uniqueString(resourceGroup().id)}-kv'
+  name: '${projectName}-${kvSuffix}-kv'
   location: location
   properties: {
     tenantId: subscription().tenantId
@@ -258,6 +271,43 @@ resource diskEncryptionSetKeyVaultAccess 'Microsoft.Authorization/roleAssignment
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e147488a-f6f5-4113-8e2d-b22465e65bf6') // Key Vault Crypto Service Encryption User
     principalId: diskEncryptionSet.identity.principalId
     principalType: 'ServicePrincipal'
+  }
+}
+
+// Log Analytics workspace for Key Vault diagnostics
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = if (enableCMK) {
+  name: '${projectName}-${kvSuffix}-law'
+  location: location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+}
+
+// Key Vault diagnostic settings - enables audit logging as required by Secure Score
+resource keyVaultDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (enableCMK) {
+  name: '${keyVault.name}-diagnostics'
+  scope: keyVault
+  properties: {
+    workspaceId: logAnalyticsWorkspace.id
+    logs: [
+      {
+        categoryGroup: 'audit'
+        enabled: true
+      }
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 
@@ -372,6 +422,21 @@ resource aadSSHExtension 'Microsoft.Compute/virtualMachines/extensions@2023-07-0
     type: 'AADSSHLoginForLinux'
     typeHandlerVersion: '1.0'
     autoUpgradeMinorVersion: true
+  }
+}
+
+// Guest Configuration extension - required for Azure Policy guest configuration audits
+// This enables Azure Security Center to assess VM configuration compliance
+resource guestConfigExtension 'Microsoft.Compute/virtualMachines/extensions@2023-07-01' = {
+  parent: vm
+  name: 'AzurePolicyforLinux'
+  location: location
+  properties: {
+    publisher: 'Microsoft.GuestConfiguration'
+    type: 'ConfigurationforLinux'
+    typeHandlerVersion: '1.0'
+    autoUpgradeMinorVersion: true
+    enableAutomaticUpgrade: true
   }
 }
 
