@@ -194,6 +194,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-05-01' = {
 
 // Storage Account for diagnostics (uses platform-managed encryption)
 // Note: Boot diagnostics storage is low-sensitivity; CMK applied to VM disks which contain actual data
+// Note: allowSharedKeyAccess must be true for Azure Serial Console to function
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
@@ -202,7 +203,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   }
   kind: 'StorageV2'
   properties: {
-    allowSharedKeyAccess: false
+    allowSharedKeyAccess: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
   }

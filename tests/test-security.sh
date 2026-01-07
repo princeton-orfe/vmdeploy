@@ -52,11 +52,11 @@ else
     fail "Guest Configuration does not use Linux configuration type"
 fi
 
-# Test 2: Storage account has shared key access disabled
-if grep -q "allowSharedKeyAccess: false" "$PROJECT_DIR/main.bicep"; then
-    pass "Storage account has shared key access disabled"
+# Test 2: Storage account has shared key access enabled (required for Serial Console)
+if grep -q "allowSharedKeyAccess: true" "$PROJECT_DIR/main.bicep"; then
+    pass "Storage account has shared key access enabled (required for Serial Console)"
 else
-    fail "Storage account does NOT have shared key access disabled"
+    fail "Storage account shared key access not configured"
 fi
 
 if grep -q "minimumTlsVersion: 'TLS1_2'" "$PROJECT_DIR/main.bicep"; then

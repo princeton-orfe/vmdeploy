@@ -174,7 +174,7 @@ This deployment addresses the following Azure Security Center recommendations:
 | Recommendation | How Addressed |
 |----------------|---------------|
 | Guest Configuration extension should be installed | AzurePolicyforLinux extension auto-installed |
-| Storage accounts should prevent shared key access | `allowSharedKeyAccess: false` on storage account |
+| Storage accounts should prevent shared key access | Not addressed - shared key required for Serial Console |
 | Linux VMs should enable Azure Disk Encryption or EncryptionAtHost | `encryptionAtHost: true` when CMK enabled |
 | Diagnostic logs in Key Vault should be enabled | Log Analytics workspace with audit logs configured |
 
