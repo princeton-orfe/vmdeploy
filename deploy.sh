@@ -648,47 +648,100 @@ else
     CREATE_PUBLIC_IP="true"
 fi
 
+# Function to run deployment with KeyVault RBAC retry logic
+run_deployment() {
+    local attempt=1
+    local max_attempts=3
+    local deployment_args="$1"
+
+    while [[ $attempt -le $max_attempts ]]; do
+        DEPLOYMENT_OUTPUT=$(eval "az deployment group create $deployment_args" 2>&1) && return 0
+
+        # Check if this is a KeyVault RBAC propagation error
+        if echo "$DEPLOYMENT_OUTPUT" | grep -q "KeyVaultAccessForbidden"; then
+            echo ""
+            echo "  KeyVault RBAC propagation delay detected (attempt $attempt/$max_attempts)"
+
+            if [[ $attempt -lt $max_attempts ]]; then
+                # Try to fix by manually assigning the role
+                echo "  Attempting to fix by assigning Disk Encryption Set access..."
+                DES_PRINCIPAL=$(az disk-encryption-set show \
+                    --name "${VM_NAME}-disk-encryption-set" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --query "identity.principalId" -o tsv 2>/dev/null || echo "")
+                KV_NAME=$(az keyvault list --resource-group "$RESOURCE_GROUP" \
+                    --query "[0].name" -o tsv 2>/dev/null || echo "")
+
+                if [[ -n "$DES_PRINCIPAL" && -n "$KV_NAME" ]]; then
+                    az role assignment create \
+                        --assignee-object-id "$DES_PRINCIPAL" \
+                        --assignee-principal-type ServicePrincipal \
+                        --role "Key Vault Crypto Service Encryption User" \
+                        --scope "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.KeyVault/vaults/$KV_NAME" \
+                        --output none 2>/dev/null || true
+
+                    echo "  Waiting 45 seconds for RBAC to propagate..."
+                    sleep 45
+                fi
+                ((attempt++))
+            else
+                echo ""
+                echo "ERROR: KeyVault RBAC propagation failed after $max_attempts attempts."
+                echo ""
+                echo "This is a known Azure timing issue. Please wait 1-2 minutes and re-run:"
+                echo "  $0 -g $RESOURCE_GROUP -n $VM_NAME -e $ALERT_EMAIL --update -y"
+                echo ""
+                exit 1
+            fi
+        else
+            # Different error - print and exit
+            echo "$DEPLOYMENT_OUTPUT"
+            exit 1
+        fi
+    done
+}
+
 if [[ "$UPDATE_MODE" == "true" ]]; then
     echo "Step 2/3: Updating infrastructure..."
     # For updates, don't pass customData - it can't be changed on existing VM
-    DEPLOYMENT_OUTPUT=$(az deployment group create \
-        --resource-group "$RESOURCE_GROUP" \
-        --template-file "$BICEP_FILE" \
+    DEPLOY_ARGS="--resource-group '$RESOURCE_GROUP' \
+        --template-file '$BICEP_FILE' \
         --parameters \
-            vmName="$VM_NAME" \
-            vmSize="$VM_SIZE" \
-            alertEmail="$ALERT_EMAIL" \
-            dataDiskSizeGB="$DATA_DISK_SIZE" \
-            adminUsername="$ADMIN_USERNAME" \
-            adminPassword="$ADMIN_PASSWORD" \
-            enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
-            projectName="$PROJECT_NAME" \
-            inboundPorts="$INBOUND_PORTS_JSON" \
-            createPublicIp="$CREATE_PUBLIC_IP" \
-            enableCMK="$ENABLE_CMK" \
-        --output json)
+            vmName='$VM_NAME' \
+            vmSize='$VM_SIZE' \
+            alertEmail='$ALERT_EMAIL' \
+            dataDiskSizeGB=$DATA_DISK_SIZE \
+            adminUsername='$ADMIN_USERNAME' \
+            adminPassword='$ADMIN_PASSWORD' \
+            enableEntraSSH=$ENABLE_ENTRA_LOGIN \
+            projectName='$PROJECT_NAME' \
+            inboundPorts='$INBOUND_PORTS_JSON' \
+            createPublicIp=$CREATE_PUBLIC_IP \
+            enableCMK=$ENABLE_CMK \
+        --output json"
+    run_deployment "$DEPLOY_ARGS"
 else
     echo "Step 2/4: Deploying infrastructure (this takes 3-5 minutes)..."
     if [[ "$ENABLE_CMK" == "true" ]]; then
         echo "  (CMK encryption adds ~2 minutes for Key Vault and encryption setup)"
     fi
-    DEPLOYMENT_OUTPUT=$(az deployment group create \
-        --resource-group "$RESOURCE_GROUP" \
-        --template-file "$BICEP_FILE" \
+    DEPLOY_ARGS="--resource-group '$RESOURCE_GROUP' \
+        --template-file '$BICEP_FILE' \
         --parameters \
-            vmName="$VM_NAME" \
-            vmSize="$VM_SIZE" \
-            alertEmail="$ALERT_EMAIL" \
-            dataDiskSizeGB="$DATA_DISK_SIZE" \
-            adminUsername="$ADMIN_USERNAME" \
-            adminPassword="$ADMIN_PASSWORD" \
-            enableEntraSSH="$ENABLE_ENTRA_LOGIN" \
-            projectName="$PROJECT_NAME" \
-            inboundPorts="$INBOUND_PORTS_JSON" \
-            createPublicIp="$CREATE_PUBLIC_IP" \
-            enableCMK="$ENABLE_CMK" \
-            customData="$CLOUD_INIT_BASE64" \
-        --output json)
+            vmName='$VM_NAME' \
+            vmSize='$VM_SIZE' \
+            alertEmail='$ALERT_EMAIL' \
+            dataDiskSizeGB=$DATA_DISK_SIZE \
+            adminUsername='$ADMIN_USERNAME' \
+            adminPassword='$ADMIN_PASSWORD' \
+            enableEntraSSH=$ENABLE_ENTRA_LOGIN \
+            projectName='$PROJECT_NAME' \
+            inboundPorts='$INBOUND_PORTS_JSON' \
+            createPublicIp=$CREATE_PUBLIC_IP \
+            enableCMK=$ENABLE_CMK \
+            customData='$CLOUD_INIT_BASE64' \
+        --output json"
+    run_deployment "$DEPLOY_ARGS"
 fi
 
 VM_IP=$(echo "$DEPLOYMENT_OUTPUT" | jq -r '.properties.outputs.vmPublicIp.value // empty')
