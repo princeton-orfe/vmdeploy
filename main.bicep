@@ -21,14 +21,14 @@ param dataDiskSizeGB int = 64
 @description('Email for failure notifications')
 param alertEmail string
 
-@description('Enable Entra ID (Azure AD) SSH login for interactive shell access')
-param enableEntraSSH bool = false
+@description('Enable Entra ID (Azure AD) login for Serial Console and SSH access')
+param enableEntraLogin bool = false
 
-@description('Enable SSH access in NSG (required for Entra ID SSH)')
+@description('Enable SSH access in NSG (requires enableEntraLogin for Entra ID SSH)')
 param enableSSHAccess bool = false
 
-@description('Source IP range for SSH access (CIDR notation, e.g., 172.20.0.0/16)')
-param sshSourceAddressPrefix string = ''
+@description('Source IP ranges for SSH access (array of CIDR notations)')
+param sshSourceAddressPrefixes array = []
 
 @description('Short project name for storage account (lowercase, no special chars)')
 param projectName string = 'vm'
@@ -92,7 +92,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
   properties: {
     securityRules: concat(
       // SSH rule - Allow or Deny based on enableSSHAccess
-      enableSSHAccess && !empty(sshSourceAddressPrefix) ? [
+      enableSSHAccess && !empty(sshSourceAddressPrefixes) ? [
         {
           name: 'AllowSSH'
           properties: {
@@ -102,7 +102,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-05-01' = {
             protocol: 'Tcp'
             sourcePortRange: '*'
             destinationPortRange: '22'
-            sourceAddressPrefix: sshSourceAddressPrefix
+            sourceAddressPrefixes: sshSourceAddressPrefixes
             destinationAddressPrefix: '*'
           }
         }
@@ -317,7 +317,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-07-01' = {
   name: vmName
   location: location
   dependsOn: enableCMK ? [diskEncryptionSetKeyVaultAccess] : []
-  identity: enableEntraSSH ? {
+  identity: enableEntraLogin ? {
     type: 'SystemAssigned'
   } : null
   properties: {
@@ -413,8 +413,9 @@ resource autoShutdown 'Microsoft.DevTestLab/schedules@2018-09-15' = {
   }
 }
 
-// Entra ID (Azure AD) SSH Login Extension - enables Azure AD authentication for SSH
-resource aadSSHExtension 'Microsoft.Compute/virtualMachines/extensions@2023-07-01' = if (enableEntraSSH) {
+// Entra ID (Azure AD) Login Extension - enables Azure AD authentication for Serial Console and SSH
+// This extension is required for Entra ID authentication at the console login prompt
+resource aadSSHExtension 'Microsoft.Compute/virtualMachines/extensions@2023-07-01' = if (enableEntraLogin) {
   parent: vm
   name: 'AADSSHLoginForLinux'
   location: location
@@ -567,7 +568,7 @@ output hasPublicIp bool = createPublicIp
 output serialConsoleUrl string = 'https://portal.azure.com/#@/resource${vm.id}/serialConsole'
 output runCommandUrl string = 'https://portal.azure.com/#@/resource${vm.id}/runCommand'
 output vmResourceId string = vm.id
-output entraSSHEnabled bool = enableEntraSSH
+output entraLoginEnabled bool = enableEntraLogin
 output sshAccessEnabled bool = enableSSHAccess
 output adminUsername string = adminUsername
 output storageAccountName string = storageAccount.name

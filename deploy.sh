@@ -21,6 +21,8 @@ ENTRA_ADMIN=""
 ENTRA_USERS=()
 ENABLE_ENTRA_LOGIN=false
 SERVICE_ADMINS=()
+ENABLE_SSH=false
+SSH_USERS=()
 AUTO_UPDATE=false
 AUTO_YES=false
 NO_PUBLIC_IP=false
@@ -71,7 +73,12 @@ Entra ID Access (enables Serial Console login with Entra credentials):
   --entra-admin EMAIL          Entra ID user with admin/sudo access
   --entra-user EMAIL           Entra ID user with standard access (repeatable)
   --service-admin EMAIL        Entra ID user who can act as service user (repeatable)
-                               Grants: sudo su - <serviceUser>, systemctl control
+                               Grants: sudo machinectl shell <serviceUser>@, systemctl control
+
+SSH Access (uses same source IPs as service ports from parameters file):
+  --enable-ssh                 Enable SSH access in NSG (default: denied)
+  --ssh-user EMAIL             Entra ID user allowed to SSH (repeatable)
+                               If not specified, all Entra ID users can SSH
 
 Other:
   -h, --help                   Show this help message
@@ -173,6 +180,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         --service-admin)
             SERVICE_ADMINS+=("$2")
+            ENABLE_ENTRA_LOGIN=true
+            shift 2
+            ;;
+        --enable-ssh)
+            ENABLE_SSH=true
+            ENABLE_ENTRA_LOGIN=true
+            shift
+            ;;
+        --ssh-user)
+            SSH_USERS+=("$2")
+            ENABLE_SSH=true
             ENABLE_ENTRA_LOGIN=true
             shift 2
             ;;
@@ -364,6 +382,13 @@ if [[ -n "$PARAMETERS_FILE" ]]; then
     SERVICE_USER=$(jq -r '.parameters.serviceUser.value // "appuser"' "$PARAMETERS_FILE")
     SERVICE_PORTS=$(jq -r '.parameters.servicePorts.value // ""' "$PARAMETERS_FILE")
     INBOUND_PORTS_JSON=$(jq -c '.parameters.inboundPorts.value // []' "$PARAMETERS_FILE")
+    # Extract all unique source IP prefixes for SSH (same as service ports)
+    SSH_SOURCE_PREFIXES_JSON=$(jq -c '[.parameters.inboundPorts.value // [] | .[].sourceAddressPrefixes] | add | unique' "$PARAMETERS_FILE")
+fi
+
+# Default SSH source prefixes to empty array if not loaded
+if [[ -z "$SSH_SOURCE_PREFIXES_JSON" ]]; then
+    SSH_SOURCE_PREFIXES_JSON="[]"
 fi
 
 # Check if resource group exists
@@ -417,7 +442,19 @@ echo "    - OS and data disks encrypted with CMK"
 else
 echo "  - Encryption: Platform-managed keys only"
 fi
+if [[ "$ENABLE_SSH" == "true" ]]; then
+echo "  - SSH: ENABLED (same source IPs as service ports)"
+if [[ ${#SSH_USERS[@]} -gt 0 ]]; then
+echo "    Allowed users:"
+for user in "${SSH_USERS[@]}"; do
+echo "      - $user"
+done
+else
+echo "    Allowed users: all Entra ID users"
+fi
+else
 echo "  - SSH: BLOCKED"
+fi
 if [[ "$INBOUND_PORTS_JSON" != "[]" ]]; then
 echo "  - Inbound Ports: (from parameters file)"
 echo "$INBOUND_PORTS_JSON" | jq -r '.[] | "    - \(.name): \(.portRange) from \(.sourceAddressPrefixes | join(", "))"'
@@ -649,16 +686,28 @@ else
 fi
 
 # Function to run deployment with KeyVault RBAC retry logic
+# Sets global DEPLOYMENT_OUTPUT variable on success
 run_deployment() {
     local attempt=1
     local max_attempts=3
     local deployment_args="$1"
+    local output
 
     while [[ $attempt -le $max_attempts ]]; do
-        DEPLOYMENT_OUTPUT=$(eval "az deployment group create $deployment_args" 2>&1) && return 0
+        echo "  Deployment attempt $attempt/$max_attempts..."
+        # Capture output; extract JSON starting from first { to handle any warning prefixes
+        if output=$(eval "az deployment group create $deployment_args" 2>&1); then
+            # Extract just the JSON part (from first { to end)
+            DEPLOYMENT_OUTPUT=$(echo "$output" | sed -n '/^{/,$p')
+            if [[ -z "$DEPLOYMENT_OUTPUT" ]]; then
+                # Fallback if sed didn't find JSON - use full output
+                DEPLOYMENT_OUTPUT="$output"
+            fi
+            return 0
+        fi
 
         # Check if this is a KeyVault RBAC propagation error
-        if echo "$DEPLOYMENT_OUTPUT" | grep -q "KeyVaultAccessForbidden"; then
+        if echo "$output" | grep -q "KeyVaultAccessForbidden"; then
             echo ""
             echo "  KeyVault RBAC propagation delay detected (attempt $attempt/$max_attempts)"
 
@@ -695,7 +744,7 @@ run_deployment() {
             fi
         else
             # Different error - print and exit
-            echo "$DEPLOYMENT_OUTPUT"
+            echo "$output"
             exit 1
         fi
     done
@@ -713,7 +762,9 @@ if [[ "$UPDATE_MODE" == "true" ]]; then
             dataDiskSizeGB=$DATA_DISK_SIZE \
             adminUsername='$ADMIN_USERNAME' \
             adminPassword='$ADMIN_PASSWORD' \
-            enableEntraSSH=$ENABLE_ENTRA_LOGIN \
+            enableEntraLogin=$ENABLE_ENTRA_LOGIN \
+            enableSSHAccess=$ENABLE_SSH \
+            sshSourceAddressPrefixes='$SSH_SOURCE_PREFIXES_JSON' \
             projectName='$PROJECT_NAME' \
             inboundPorts='$INBOUND_PORTS_JSON' \
             createPublicIp=$CREATE_PUBLIC_IP \
@@ -734,7 +785,9 @@ else
             dataDiskSizeGB=$DATA_DISK_SIZE \
             adminUsername='$ADMIN_USERNAME' \
             adminPassword='$ADMIN_PASSWORD' \
-            enableEntraSSH=$ENABLE_ENTRA_LOGIN \
+            enableEntraLogin=$ENABLE_ENTRA_LOGIN \
+            enableSSHAccess=$ENABLE_SSH \
+            sshSourceAddressPrefixes='$SSH_SOURCE_PREFIXES_JSON' \
             projectName='$PROJECT_NAME' \
             inboundPorts='$INBOUND_PORTS_JSON' \
             createPublicIp=$CREATE_PUBLIC_IP \
@@ -794,7 +847,31 @@ if [[ -n "$CURRENT_USER" && -n "$STORAGE_ACCOUNT_NAME_OUTPUT" ]]; then
         --output none 2>/dev/null || echo "  (Storage Blob Data Contributor role may already be assigned)"
 fi
 
-# Helper function to assign role with retry
+# Helper function to resolve user email to object ID
+# This validates Graph API access upfront
+resolve_user_object_id() {
+    local email="$1"
+
+    # Look up user object ID
+    local cmd_output
+    if ! cmd_output=$(az ad user show --id "$email" --query id -o tsv 2>&1); then
+        # Check for CAE token error
+        if echo "$cmd_output" | grep -q "InteractionRequired\|InvalidAuthenticationToken"; then
+            echo ""
+            echo "ERROR: Azure CLI token has expired or requires re-authentication."
+            echo ""
+            echo "Please run:"
+            echo "  az account clear && az login"
+            echo ""
+            echo "Then re-run this deployment."
+            exit 1
+        fi
+        return 1
+    fi
+    echo "$cmd_output"
+}
+
+# Helper function to assign role with retry using object ID
 assign_role_with_retry() {
     local assignee="$1"
     local role="$2"
@@ -802,9 +879,14 @@ assign_role_with_retry() {
     local max_attempts=3
     local attempt=1
 
+    # Resolve email to object ID first (uses cache after first lookup)
+    local object_id
+    object_id=$(resolve_user_object_id "$assignee") || return 1
+
     while [[ $attempt -le $max_attempts ]]; do
         if az role assignment create \
-            --assignee "$assignee" \
+            --assignee-object-id "$object_id" \
+            --assignee-principal-type User \
             --role "$role" \
             --scope "$scope" \
             --output none 2>/dev/null; then
@@ -906,7 +988,12 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
             for user in "${ENTRA_USERS[@]}"; do
                 echo "  Granting Serial Console access to $user (scoped to $VM_NAME only)..."
 
-                # Assign role scoped to VM
+                # Virtual Machine User Login - required for Entra ID login at console prompt
+                if ! assign_role_with_retry "$user" "Virtual Machine User Login" "$VM_RESOURCE_ID"; then
+                    echo "    Warning: Could not assign VM User Login role (user may not exist or already assigned)"
+                fi
+
+                # Assign custom role scoped to VM (for Serial Console permissions)
                 if ! assign_role_with_retry "$user" "$CUSTOM_ROLE_NAME" "$VM_RESOURCE_ID"; then
                     echo "    Warning: Could not assign VM role (user may not exist or already assigned)"
                 fi
@@ -938,6 +1025,43 @@ if [[ "$ENABLE_ENTRA_LOGIN" == "true" ]]; then
             done
         fi
     fi
+fi
+
+# Configure SSH user restrictions if SSH is enabled with specific users
+if [[ "$ENABLE_SSH" == "true" && ${#SSH_USERS[@]} -gt 0 ]]; then
+    echo ""
+    echo "Configuring SSH access restrictions..."
+
+    # Build AllowUsers directive (Entra ID users only, no local admin)
+    ALLOW_USERS=""
+    for user in "${SSH_USERS[@]}"; do
+        if [[ -z "$ALLOW_USERS" ]]; then
+            ALLOW_USERS="$user"
+        else
+            ALLOW_USERS="$ALLOW_USERS $user"
+        fi
+    done
+
+    # Apply SSH configuration via Run Command
+    az vm run-command invoke \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$VM_NAME" \
+        --command-id RunShellScript \
+        --scripts "
+# Remove any existing AllowUsers directive
+sed -i '/^AllowUsers/d' /etc/ssh/sshd_config
+
+# Add AllowUsers directive
+echo 'AllowUsers $ALLOW_USERS' >> /etc/ssh/sshd_config
+
+# Restart sshd
+systemctl restart sshd
+
+echo 'SSH access restricted to: $ALLOW_USERS'
+" \
+        --output none 2>/dev/null || echo "  Warning: Could not configure SSH restrictions via Run Command"
+
+    echo "  SSH access restricted to: $ALLOW_USERS"
 fi
 
 echo ""

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.39.26.7824",
-      "templateHash": "5521040409630495343"
+      "templateHash": "11161121114653219276"
     }
   },
   "parameters": {
@@ -54,25 +54,25 @@
         "description": "Email for failure notifications"
       }
     },
-    "enableEntraSSH": {
+    "enableEntraLogin": {
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "description": "Enable Entra ID (Azure AD) SSH login for interactive shell access"
+        "description": "Enable Entra ID (Azure AD) login for Serial Console and SSH access"
       }
     },
     "enableSSHAccess": {
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "description": "Enable SSH access in NSG (required for Entra ID SSH)"
+        "description": "Enable SSH access in NSG (requires enableEntraLogin for Entra ID SSH)"
       }
     },
-    "sshSourceAddressPrefix": {
-      "type": "string",
-      "defaultValue": "",
+    "sshSourceAddressPrefixes": {
+      "type": "array",
+      "defaultValue": [],
       "metadata": {
-        "description": "Source IP range for SSH access (CIDR notation, e.g., 172.20.0.0/16)"
+        "description": "Source IP ranges for SSH access (array of CIDR notations)"
       }
     },
     "projectName": {
@@ -169,7 +169,7 @@
       "name": "[variables('nsgName')]",
       "location": "[parameters('location')]",
       "properties": {
-        "securityRules": "[concat(if(and(parameters('enableSSHAccess'), not(empty(parameters('sshSourceAddressPrefix')))), createArray(createObject('name', 'AllowSSH', 'properties', createObject('priority', 1000, 'direction', 'Inbound', 'access', 'Allow', 'protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '22', 'sourceAddressPrefix', parameters('sshSourceAddressPrefix'), 'destinationAddressPrefix', '*'))), createArray(createObject('name', 'DenySSH', 'properties', createObject('priority', 1000, 'direction', 'Inbound', 'access', 'Deny', 'protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '22', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', '*')))), variables('customInboundRules'))]"
+        "securityRules": "[concat(if(and(parameters('enableSSHAccess'), not(empty(parameters('sshSourceAddressPrefixes')))), createArray(createObject('name', 'AllowSSH', 'properties', createObject('priority', 1000, 'direction', 'Inbound', 'access', 'Allow', 'protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '22', 'sourceAddressPrefixes', parameters('sshSourceAddressPrefixes'), 'destinationAddressPrefix', '*'))), createArray(createObject('name', 'DenySSH', 'properties', createObject('priority', 1000, 'direction', 'Inbound', 'access', 'Deny', 'protocol', 'Tcp', 'sourcePortRange', '*', 'destinationPortRange', '22', 'sourceAddressPrefix', '*', 'destinationAddressPrefix', '*')))), variables('customInboundRules'))]"
       }
     },
     {
@@ -375,7 +375,7 @@
       "apiVersion": "2023-07-01",
       "name": "[parameters('vmName')]",
       "location": "[parameters('location')]",
-      "identity": "[if(parameters('enableEntraSSH'), createObject('type', 'SystemAssigned'), null())]",
+      "identity": "[if(parameters('enableEntraLogin'), createObject('type', 'SystemAssigned'), null())]",
       "properties": {
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
@@ -462,7 +462,7 @@
       ]
     },
     {
-      "condition": "[parameters('enableEntraSSH')]",
+      "condition": "[parameters('enableEntraLogin')]",
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2023-07-01",
       "name": "[format('{0}/{1}', parameters('vmName'), 'AADSSHLoginForLinux')]",
@@ -654,9 +654,9 @@
       "type": "string",
       "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
     },
-    "entraSSHEnabled": {
+    "entraLoginEnabled": {
       "type": "bool",
-      "value": "[parameters('enableEntraSSH')]"
+      "value": "[parameters('enableEntraLogin')]"
     },
     "sshAccessEnabled": {
       "type": "bool",

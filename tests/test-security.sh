@@ -171,7 +171,45 @@ else
     fail "configure-security-contacts.sh does NOT enable alert notifications"
 fi
 
-# Test 10: main.json is up to date
+# Test 10: Entra ID authentication support in main.bicep
+echo ""
+echo "Testing Entra ID authentication configuration..."
+
+if grep -q "enableEntraLogin" "$PROJECT_DIR/main.bicep"; then
+    pass "main.bicep has enableEntraLogin parameter"
+else
+    fail "main.bicep does NOT have enableEntraLogin parameter"
+fi
+
+if grep -q "AADSSHLoginForLinux" "$PROJECT_DIR/main.bicep"; then
+    pass "main.bicep defines AADSSHLoginForLinux extension"
+else
+    fail "main.bicep does NOT define AADSSHLoginForLinux extension"
+fi
+
+if grep -q "type: 'SystemAssigned'" "$PROJECT_DIR/main.bicep"; then
+    pass "main.bicep supports System Assigned Managed Identity"
+else
+    fail "main.bicep does NOT support System Assigned Managed Identity"
+fi
+
+# Test 11: deploy.sh grants Virtual Machine Login roles
+echo ""
+echo "Testing deploy.sh Entra ID role assignments..."
+
+if grep -q "Virtual Machine Administrator Login" "$PROJECT_DIR/deploy.sh"; then
+    pass "deploy.sh grants Virtual Machine Administrator Login role"
+else
+    fail "deploy.sh does NOT grant Virtual Machine Administrator Login role"
+fi
+
+if grep -q "Virtual Machine User Login" "$PROJECT_DIR/deploy.sh"; then
+    pass "deploy.sh grants Virtual Machine User Login role"
+else
+    fail "deploy.sh does NOT grant Virtual Machine User Login role"
+fi
+
+# Test 12: main.json is up to date
 echo ""
 echo "Testing main.json synchronization..."
 
@@ -194,6 +232,12 @@ if [[ -f "$PROJECT_DIR/main.json" ]]; then
         pass "main.json contains diagnostic settings"
     else
         fail "main.json does NOT contain diagnostic settings (rebuild needed)"
+    fi
+
+    if grep -q "AADSSHLoginForLinux" "$PROJECT_DIR/main.json"; then
+        pass "main.json contains AADSSHLoginForLinux extension"
+    else
+        fail "main.json does NOT contain AADSSHLoginForLinux extension (rebuild needed)"
     fi
 else
     fail "main.json does NOT exist"
