@@ -14,6 +14,8 @@ ASSIGN_ROLES=false
 SERVICE_ADMINS=()
 SERVICE_USER="appuser"
 PARAMETERS_FILE=""
+SSH_USERS=()
+CONFIGURE_SSH=false
 
 usage() {
     cat <<EOF
@@ -30,6 +32,8 @@ Actions:
   --service-admin EMAIL        Entra ID user for role assignment (repeatable)
   --service-user USERNAME      Service user for sudoers (default: appuser)
   --parameters FILE            Load service user from parameters file
+  --ssh-user EMAIL             Restrict SSH access to specific Entra ID user (repeatable)
+                               Configures AllowUsers in sshd_config
 
 Examples:
   Reset admin password:
@@ -40,9 +44,15 @@ Examples:
        --service-admin user1@example.com \\
        --service-admin user2@example.com
 
-  Both:
+  Configure SSH access for specific users:
+    $0 -g myapp-rg -n myapp-vm \\
+       --ssh-user user1@example.com \\
+       --ssh-user user2@example.com
+
+  All options:
     $0 -g myapp-rg -n myapp-vm --reset-password -u myadmin \\
-       --assign-roles --service-admin user@example.com
+       --assign-roles --service-admin user@example.com \\
+       --ssh-user user@example.com
 
 EOF
     exit 1
@@ -83,6 +93,11 @@ while [[ $# -gt 0 ]]; do
             PARAMETERS_FILE="$2"
             shift 2
             ;;
+        --ssh-user)
+            SSH_USERS+=("$2")
+            CONFIGURE_SSH=true
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -104,8 +119,8 @@ if [[ -z "$VM_NAME" ]]; then
     usage
 fi
 
-if [[ "$RESET_PASSWORD" == "false" && "$ASSIGN_ROLES" == "false" ]]; then
-    echo "Error: Must specify --reset-password and/or --assign-roles"
+if [[ "$RESET_PASSWORD" == "false" && "$ASSIGN_ROLES" == "false" && "$CONFIGURE_SSH" == "false" ]]; then
+    echo "Error: Must specify --reset-password, --assign-roles, and/or --ssh-user"
     usage
 fi
 
@@ -152,6 +167,12 @@ fi
 if [[ "$ASSIGN_ROLES" == "true" ]]; then
     echo "Action: Assign Entra ID roles"
     for user in "${SERVICE_ADMINS[@]}"; do
+        echo "  - $user"
+    done
+fi
+if [[ "$CONFIGURE_SSH" == "true" ]]; then
+    echo "Action: Configure SSH access"
+    for user in "${SSH_USERS[@]}"; do
         echo "  - $user"
     done
 fi
@@ -322,6 +343,43 @@ if [[ "$ASSIGN_ROLES" == "true" ]]; then
     echo ""
 fi
 
+# Configure SSH user restrictions
+if [[ "$CONFIGURE_SSH" == "true" ]]; then
+    echo "Configuring SSH access restrictions..."
+
+    # Build AllowUsers directive (Entra ID users only)
+    ALLOW_USERS=""
+    for user in "${SSH_USERS[@]}"; do
+        if [[ -z "$ALLOW_USERS" ]]; then
+            ALLOW_USERS="$user"
+        else
+            ALLOW_USERS="$ALLOW_USERS $user"
+        fi
+    done
+
+    # Apply SSH configuration via Run Command
+    az vm run-command invoke \
+        --resource-group "$RESOURCE_GROUP" \
+        --name "$VM_NAME" \
+        --command-id RunShellScript \
+        --scripts "
+# Remove any existing AllowUsers directive
+sed -i '/^AllowUsers/d' /etc/ssh/sshd_config
+
+# Add AllowUsers directive
+echo 'AllowUsers $ALLOW_USERS' >> /etc/ssh/sshd_config
+
+# Restart sshd
+systemctl restart sshd
+
+echo 'SSH access restricted to: $ALLOW_USERS'
+" \
+        --output none 2>/dev/null || echo "  Warning: Could not configure SSH restrictions via Run Command"
+
+    echo "  SSH access restricted to: $ALLOW_USERS"
+    echo ""
+fi
+
 echo "========================================"
 echo "Post-Deployment Complete"
 echo "========================================"
@@ -338,6 +396,13 @@ fi
 if [[ "$ASSIGN_ROLES" == "true" ]]; then
     echo "Entra ID login (at Serial Console prompt):"
     for user in "${SERVICE_ADMINS[@]}"; do
+        echo "  - $user"
+    done
+    echo ""
+fi
+if [[ "$CONFIGURE_SSH" == "true" ]]; then
+    echo "SSH access allowed for:"
+    for user in "${SSH_USERS[@]}"; do
         echo "  - $user"
     done
     echo ""
